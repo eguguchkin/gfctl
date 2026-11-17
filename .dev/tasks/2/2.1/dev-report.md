@@ -129,3 +129,32 @@
 ### Notes
 
 - Файлы фикс-раунда: `lib/models.sh`, `tests/run_checks.sh` (+ эта секция отчёта). STATE/history/EXP-скрипты не трогал, не коммитил.
+
+## Fix round 2.1-F3 (2026-11-17): ROUTE_MODEL обрезался по пробелу → 404 model_not_found
+
+**Триггер:** живой факт EXP-005 (FAEX): gufo регистрирует flash-модель как `Qwen3.8 Flash Next` — С ПРОБЕЛАМИ (load_completed `model=Qwen3.8 Flash Next sessions=2 …`; /v1/models подтверждает id). Смоук получил 404 model_not_found: старый парсинг `grep -oE 'model=[^ ]+'` отрезал имя по первому пробелу → в запрос уходило `"model":"Qwen3.8"`.
+
+### What was done
+
+- **lib/health.sh, `parse_route` (root cause, одна строка):** `ROUTE_MODEL` = подстрока между `model=` и ` sessions=`: `sed -n 's/.*model=//p' | sed 's/sessions=.*//; s/[[:space:]]*$//'`. Флаг `s///p` печатает ТОЛЬКО при совпадении `model=` → нет совпадения ⇒ `''` (контракт «пусто → ROUTE_MODEL=''» сохранён; sed rc 0 всегда — `|| true` больше не нужен). Жадный `.*` берёт последнее вхождение `model=` (= старое «tail -n 1»); имя с пробелами приходит целиком; sessions= присутствует в load_completed всегда (F5/F17, лог EXP-005: `… model=Qwen3.8 Flash Next sessions=2 context_tokens=262144 speculative=mtp …`). Комментарий-«почему» в коде + дополнены докстринг `parse_route` и шапка модуля.
+- **bench-путь проверен, правки НЕ требует:** `cmd_bench` строит тело запроса из того же `$ROUTE_MODEL` (lib/commands.sh:708, `python3 - "$fixture" "$ROUTE_MODEL"` → `"model": sys.argv[2]`); `bench_request` транспортует готовое тело без своего источника имени. Bench и smoke шлют ОДНО имя — чинится парсингом автоматически.
+- **tests/run_checks.sh, §19 (health), +3 ассерта (222 → 225):** фикстура `LOGSP` — реальная форма строки FAEX (loader event=load_completed kind=text … model=Qwen3.8 Flash Next sessions=2 …): (1) `parse_route` на `LOGSP` → `[Qwen3.8 Flash Next|mtp|2|262144]` — имя целиком; (2) негатив-совместимость: старое имя без пробелов (`model=…pure sessions=1 …` в середине строки) парсится целиком; (3) smoke поверх `LOGSP`: SMOKE OK, ровно 3 curl-вызова, faux-лог curl содержит `"model":"Qwen3.8 Flash Next"` (полное имя в JSON; bench шлёт тот же ROUTE_MODEL).
+
+### How it was checked internally
+
+| check | команда | результат |
+|---|---|---|
+| синтаксис | `bash -n gfctl lib/*.sh tests/run_checks.sh` | OK |
+| **батарея** | `bash tests/run_checks.sh` | **ИТОГО: PASS=225 FAIL=0** (было 222, +3) |
+| батарея ловит баг | временный откат строки на старый grep → батарея | ровно 2 FAIL на новых ассертах: `parse_route пробелы: '[Qwen3.8\|mtp\|2\|262144]'` (симптом инцидента) + smoke-имя; негатив-совместимость зелёная на обоих парсерах; фикс восстановлен, повторно 225/0 |
+| md5 фикстуры | `md5sum tpl/bench/merge_sort_thinking_off.txt` | `253c7ac50857fe6d0e10fb0d2c5e35c0` (не менялась) |
+| py_compile / bare / status --json | внутри батареи (§1/§2/§12) | зелёные |
+
+### Not checked internally
+
+- **Повторный живой смоук на FAEX после фикса** (BLOCKED-EXTERNAL, EXP-005/следующее окно): `gfctl smoke` на поднятом flash-multi → SMOKE 3/3 (реальный сервер принимает `"Qwen3.8 Flash Next"`), без 404 model_not_found.
+
+### Notes
+
+- `status --json` (commands.sh:264) сериализует ROUTE_MODEL без экранирования — пробелы в JSON легальны, кавычек в движковых именах не наблюдалось (бэклог-пункт «JSON-экранирование» уже существует, не расширял).
+- Файлы фикс-раунда: `lib/health.sh`, `tests/run_checks.sh` (+ эта секция отчёта). STATE/history/EXP-скрипты/FACTS не трогал, не коммитил.

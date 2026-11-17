@@ -99,17 +99,17 @@ $SSH "$GF_ACC_USER@$GF_ACC_HOST" 'bash -s' <<'REMOTE' || {
   echo "== gfctl install.sh — bootstrap"
   bash "$HOME/gfctl-acc-src/install.sh" || exit 44
 
-  echo "== веса: симлинки существующих файлов окна FX (0 байт трафика)"
+  echo "== веса: хардлинки существующих файлов окна FX (0 байт трафика; симлинки не видны в контейнере через bind-маунт — инцидент EXP-005/2)"
   mkdir -p "$FLASH_DIR"
   n=0
   for f in "$HOME"/gufo-models/flash-next-q4xl/Qwen3.8-Flash-Next-UD-Q4_K_XL-*-of-00004.gguf; do
     [ -f "$f" ] || { echo "НЕТ шарда-источника: $f"; exit 45; }
-    ln -sfn "$f" "$FLASH_DIR/$(basename "$f")"; n=$((n + 1))
+    ln -f "$f" "$FLASH_DIR/$(basename "$f")"; n=$((n + 1))
   done
   [ "$n" = 4 ] || { echo "ожидали 4 шарда q4xl, найдено $n"; exit 45; }
   mtpsrc=$(find "$HOME/gufo-models/flash-next-ixs" -name 'mtp-Qwen3.8-Flash-Next-shared-Q8_0.gguf' 2>/dev/null | head -n1)
   [ -n "$mtpsrc" ] || { echo "НЕТ MTP-источника в ~/gufo-models/flash-next-ixs"; exit 45; }
-  ln -sfn "$mtpsrc" "$FLASH_DIR/mtp-Qwen3.8-Flash-Next-shared-Q8_0.gguf"
+  ln -f "$mtpsrc" "$FLASH_DIR/mtp-Qwen3.8-Flash-Next-shared-Q8_0.gguf"
   ls -l "$FLASH_DIR"
 
   echo "== download flash: ожидаем SKIP×5"

@@ -94,6 +94,28 @@ gfctl off → hfctl on HEALTHY 15 с → smoke OK.
 - ⚠️ rsync в ocbox отсутствует: EXP-транспорт = tar|ssh (правка 2026-11-17,
   все три EXP).
 
+## F20 · flash-multi 2×262144 ВЛЕЗАЕТ на FAEX — максимум лестницы (EXP-005, 2026-11-17)
+Явная попытка + probe: `load_completed sessions=2 context_tokens=262144
+speculative=mtp draft_limit=7 elapsed 97.4 c`; gpu_device 105 375 из
+126 976 MiB; host_available 21.5–21.7 GiB; RAM-cache 4 GiB + automatic
+9.5 GiB (движок сам расширил), disk 64 GiB enabled. КАНОН пары
+(flash-multi,2)=262144 записан probe'ом (env-оверрайд, без второго
+recreate). Ответ на вопрос пользователя: контексты хватит на МАКСИМУМ
+лестницы — 2×262144; 4-сессии и bench-числа — после F3 (смок-404 из-за
+обрезки ROUTE_MODEL по пробелу — F19/F20 класс живых дефектов парсинга).
+Зарегистрированное имя модели gufo: «Qwen3.8 Flash Next» (С пробелами;
+/v1/models) — парсинг ROUTE_MODEL должен быть «до sessions=».
+
+## F19 · Симлинки весов не видны в контейнере через bind-маунт (FAEX, 2026-11-17)
+`~/gfctl-acc-models/flash/` с СИМЛИНКАМИ на `~/gufo-models/...`: podman
+маунтит каталог, но цели симлинков вне маунта → движок: `cannot open
+/models/…: No such file or directory`, load_failed на ЛЮБОЙ ступени
+(контейнеру нужен сам файл в маунт-каталоге). Решение: ХАРДЛИНКИ
+(`ln -f` — тот же инод, 0 байт копий, контейнер видит регулярный файл);
+SKIP download_file по хардлинкам тоже работает. Второй урок: `pkill -f
+"<имя скрипта>"` из оркестраторской ssh-команды убивает и себя (паттерн
+в собственной cmdline) — остановку фоновых EXP делать kill PID.
+
 ## F18 · 27b-multi (2×163840) живой на evo — IQ4_XS (мини-окно 2026-11-17)
 `gfctl use 27b-multi`: гейт ≥56 OK, загрузка **15 с**, роут
 `dflash2, sessions 2, ctx 163840`, SMOKE 3/3, повторный use идемпотентен

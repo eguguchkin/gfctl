@@ -183,6 +183,11 @@ printf 'noise\n' >> "$LOGTWO"
 printf 'event=load_completed speculative=mtp sessions=2 context_tokens=131072 model=B\n' >> "$LOGTWO"
 LOGNONE="$TMP/lognone"; printf 'event=listening address=http://0.0.0.0:8080\n' > "$LOGNONE"
 LOGFAIL="$TMP/logfail"; printf 'event=listening\nmodel load error: OOM\n event=load_failed reason=oom\n' > "$LOGFAIL"
+# 2.1-F3 (EXP-005 FAEX): gufo регистрирует flash как «Qwen3.8 Flash Next» —
+# имя С ПРОБЕЛАМИ посреди load_completed-строки (форма строки = лог FAEX)
+LOGSP="$TMP/logspaces"
+printf 'event=listening address=http://0.0.0.0:8080\n' > "$LOGSP"
+printf '2026-11-17 [INFO] [loader] event=load_completed kind=text elapsed_ms=97399 monotonic_us=622886939311 model=Qwen3.8 Flash Next sessions=2 context_tokens=262144 speculative=mtp draft_limit=7 disk_cache=enabled rss_mib=2648\n' >> "$LOGSP"
 
 echo "== 1. AGENTS internal checks: bash -n / py_compile"
 if bash -n gfctl lib/*.sh 2>&1; then ok "bash -n gfctl lib/*.sh"; else bad "bash -n gfctl lib/*.sh"; fi
@@ -606,6 +611,24 @@ printf "[%s|%s|%s|%s]" "$ROUTE_SPEC" "$ROUTE_SESSIONS" "$ROUTE_CTX" "$ROUTE_MODE
 [ "$pr" = "[mtp|2|131072|B]" ] && ok "parse_route: ПОСЛЕДНЯЯ load_completed побеждает (все 4 поля)" || bad "parse_route: '$pr'"
 pr0=$(gf 'parse_route < <(printf "nothing here\n"); printf "[%s|%s|%s|%s]" "${ROUTE_SPEC:-}" "${ROUTE_SESSIONS:-}" "${ROUTE_CTX:-}" "${ROUTE_MODEL:-}"')
 [ "$pr0" = "[|||]" ] && ok "parse_route: нет load_completed → пустые ROUTE_*, rc 0" || bad "parse_route пусто"
+# 2.1-F3: имя С ПРОБЕЛАМИ парсится ЦЕЛИКОМ (модель = между «model=» и « sessions=»)
+prsp=$(gf 'parse_route < "$LOGSP"
+printf "[%s|%s|%s|%s]" "$ROUTE_MODEL" "$ROUTE_SPEC" "$ROUTE_SESSIONS" "$ROUTE_CTX"')
+[ "$prsp" = "[Qwen3.8 Flash Next|mtp|2|262144]" ] \
+  && ok "parse_route: имя с пробелами целиком «Qwen3.8 Flash Next» (F3, EXP-005 FAEX)" || bad "parse_route пробелы: '$prsp'"
+# 2.1-F3 негатив-совместимость: старое имя БЕЗ пробелов (model= в середине строки)
+prold=$(gf 'parse_route < <(printf "%s\n" "event=load_completed kind=text elapsed_ms=97399 model=qwen3.8-27b-IQ4_XS-pure sessions=1 context_tokens=262144 speculative=dflash2")
+printf "[%s]" "$ROUTE_MODEL"')
+[ "$prold" = "[qwen3.8-27b-IQ4_XS-pure]" ] \
+  && ok "негатив-совместимость: имя без пробелов парсится целиком" || bad "parse_route без пробелов: '$prold'"
+# 2.1-F3: смоук с faux-curl принимает имя-с-пробелами; bench шлёт ТОТ ЖЕ
+# ROUTE_MODEL (commands.sh: body строится из него же) — одно имя на оба пути
+: > "$FAUXLOG"; rm -f "$FAUXCNT.curl"
+set +e; out=$(GFCTL_FAUX_INSPECT=running GFCTL_FAUX_PODMAN_LOGS="$LOGSP" frun smoke 2>&1); smsp_rc=$?; set -e
+[ "$smsp_rc" = 0 ] && grep -q 'SMOKE: OK' <<<"$out" && grep -Fq '"model":"Qwen3.8 Flash Next"' "$FAUXLOG" \
+  && [ "$(cat "$FAUXCNT.curl")" = 3 ] \
+  && ok "smoke с именем-с-пробелами: SMOKE OK, 3 вызова, JSON шлёт полное имя (bench — тот же ROUTE_MODEL)" \
+  || bad "smoke пробелы (rc=$smsp_rc)"
 set +e; out=$(GFCTL_FAUX_PODMAN_LOGS="$LOGOK" gf 'wait_load 4' 2>&1); wl_rc=$?; set -e
 [ "$wl_rc" = 0 ] && grep -q 'загрузка завершена после 0с' <<<"$out" \
   && ok "wait_load: fixture-лог с load_completed → rc 0" || bad "wait_load ok (rc=$wl_rc)"

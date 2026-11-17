@@ -3,6 +3,7 @@
 # gufo не имеет hipfire-формата /health: роут читается из лога контейнера —
 # ПОСЛЕДНЯЯ строка `event=load_completed` (формат подтверждён окнами IX/FX:
 # «… speculative=dflash2 … sessions=1 context_tokens=262144 … model=…»);
+# имена моделей gufo бывают С ПРОБЕЛАМИ (EXP-005 FAEX: «Qwen3.8 Flash Next»);
 # http-проба — GET /ready. Смоук — 3 запроса чата, ретрай РОВНО ПЕРВОГО
 # через GFCTL_SMOKE_RETRY_S (дефолт 15 с, F15: прогрев ядер после recreate).
 # Парсинг движковых строк изолирован в parse_route/http_ready — смена
@@ -12,7 +13,9 @@
 
 # Назначение: ЧИСТЫЙ фильтр роута — текст лога на stdin; берёт ПОСЛЕДНЮЮ
 #   строку с `event=load_completed` и извлекает поля speculative=, sessions=,
-#   context_tokens=, model= (grep -o + cut -d=). ПИШЕТ глобалы ROUTE_SPEC/
+#   context_tokens=, model= (grep -o + cut -d=; model= — подстрока между
+#   «model=» и « sessions=», т.к. имена gufo содержат ПРОБЕЛЫ — EXP-005 FAEX;
+#   sessions= присутствует в load_completed всегда). ПИШЕТ глобалы ROUTE_SPEC/
 #   ROUTE_SESSIONS/ROUTE_CTX/ROUTE_MODEL ('' = совпадения нет). В stdout не
 #   печатает.
 #
@@ -33,7 +36,11 @@ parse_route() {
   ROUTE_SPEC=$(printf '%s\n' "$line" | grep -oE 'speculative=[^ ]+' | tail -n 1 | cut -d= -f2-) || true
   ROUTE_SESSIONS=$(printf '%s\n' "$line" | grep -oE 'sessions=[0-9]+' | tail -n 1 | cut -d= -f2-) || true
   ROUTE_CTX=$(printf '%s\n' "$line" | grep -oE 'context_tokens=[0-9]+' | tail -n 1 | cut -d= -f2-) || true
-  ROUTE_MODEL=$(printf '%s\n' "$line" | grep -oE 'model=[^ ]+' | tail -n 1 | cut -d= -f2-) || true
+  # 2.1-F3: имя = подстрока между «model=» и « sessions=» — старый grep
+  # 'model=[^ ]+' обрезал по пробелу («Qwen3.8» → 404 model_not_found;
+  # EXP-005 FAEX: имена gufo содержат пробелы, sessions= есть всегда).
+  # s///p печатает ТОЛЬКО при совпадении model= → нет совпадения ⇒ ''.
+  ROUTE_MODEL=$(printf '%s\n' "$line" | sed -n 's/.*model=//p' | sed 's/sessions=.*//; s/[[:space:]]*$//')
   return 0
 }
 
