@@ -1,17 +1,25 @@
 # STATE gfctl (единственная точка правды «где мы сейчас»)
 
-Текущий сабстэдж: **2.1 probe-подбор контекста + gfctl bench** (этап 2) —
-in-dev (round 0/3), fork: design-heavy → architect.
+Текущий сабстэдж: — (2.1 CLOSED; окна этапа 2 ждут GO пользователя).
 
-Closed: **1.1** (APPROVED), **1.2** (APPROVED) → **ЭТАП 1 ЗАКРЫТ** +
-EXP-приёмка evo PASS×3 (F17) + мини-окно 27b-multi (F18, EXP-004 PASS).
+Closed: **1.1**, **1.2** (APPROVED) → **ЭТАП 1 ЗАКРЫТ** (EXP-приёмка evo
+PASS×3, F17; мини-окно 27b-multi, F18). **2.1 probe + bench** (2026-11-17,
+APPROVED round 1: DoD 8/8, инварианты по коду, батарея 218×5, регресс
+171/171; git: код + board закоммичены оркестратором).
 
-Решение пользователя (2026-11-17): окно этапа 2 — FAEX **flash-only** (веса
-уже на диске → симлинки, 0 трафика; check-types КРАСНЫЙ прогон на ixs-
-шардах); **27b-multi probe 196608 — мини-окно на evo** (веса там).
+Решения окон: FAEX — flash-only, 0 трафика (веса симлинками, MTP плоско
+в flash/ — НЕ возвращать в flash/MTP/); 27b-probe — evo (D6: отдельный GO).
 
-Next step: architect пишет `$BB/tasks/2/2.1/task.md` → developer → tester →
-reviewer → окна (EXP-005-faex, EXP-006-evo-probe).
+Бэклог (из review 2.1): install-probe (SPEC §3 обещает — отдельный
+сабстэдж до этапа 4 или правка §3 в дельта этапа 4); хвост лога → журнал
+probe (admission-цифры промежуточных ступеней теряются); display-имена
+GGUF-типов + граница RED (этап 2-валидация живыми шардами в EXP-005);
+part>pin; --check-types лишний аргумент; JSON-экранирование.
+
+Next step: **GO пользователя** → EXP-005-faex (hfctl off → симлинки →
+use flash-multi probe 262144→… → bench ×3 → sessions 4 → check-types
+КРАСНЫЙ на ixs → hfctl on). Затем EXP-006-evo-probe (196608) по отдельному
+GO. Этап 3 (agent-check/cache/watch) — после окон.
 
 Closed: **1.2 жизненный цикл** (2026-11-17, APPROVED round 1: DoD 9/9,
 регресс reviewer'а PASS=180 FAIL=0, blocking нет; 11 non-critical в
