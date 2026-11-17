@@ -365,6 +365,17 @@ set +e; dlf_out=$(dlf "file://$TMP/srv/blob1" "$TMP/dl/flash/b.gguf" 200000 "$sh
 set +e; dlf_out=$(dlf "file://$TMP/srv/blob1" "$TMP/dl/flash/a.gguf" 200000 "$sha1"); s_rc=$?; set -e
 [ "$s_rc" = 0 ] && grep -q 'SKIP: a.gguf' <<<"$dlf_out" \
   && ok "SKIP при совпавшем размере" || bad "SKIP (rc=$s_rc)"
+# 2.1-F1: dest-симлинк — SKIP по размеру ЦЕЛЕВОГО файла, симлинк не заменяется
+ln -s "$TMP/srv/blob1" "$TMP/dl/flash/link_ok.gguf"
+set +e; dlf_out=$(dlf "file://$TMP/srv/blob2" "$TMP/dl/flash/link_ok.gguf" 200000 "$sha1"); ls_rc=$?; set -e
+[ "$ls_rc" = 0 ] && grep -q 'SKIP: link_ok.gguf' <<<"$dlf_out" && [ -L "$TMP/dl/flash/link_ok.gguf" ] \
+  && ok "SKIP по симлинку (stat -L): симлинк не заменён файлом" || bad "SKIP симлинк (rc=$ls_rc)"
+ln -s "$TMP/srv/blob2" "$TMP/dl/flash/link_bad.gguf"   # целевой 100000 B ≠ пин 200000
+set +e; dlf_out=$(dlf "file://$TMP/srv/blob1" "$TMP/dl/flash/link_bad.gguf" 200000 "$sha1"); lb_rc=$?; set -e
+! grep -q 'SKIP: link_bad.gguf' <<<"$dlf_out" && [ "$lb_rc" = 0 ] \
+  && grep -q 'PASS: link_bad.gguf (sha OK)' <<<"$dlf_out" && [ ! -L "$TMP/dl/flash/link_bad.gguf" ] \
+  && cmp -s "$TMP/dl/flash/link_bad.gguf" "$TMP/srv/blob1" \
+  && ok "негатив: симлинк не-того размера → НЕ SKIP, скачал, PASS" || bad "негатив симлинк (rc=$lb_rc)"
 sha2=$(sha256sum "$TMP/srv/blob1" | awk '{print $1}')   # заведомо чужой sha для blob2
 set +e; dlf_out=$(dlf "file://$TMP/srv/blob2" "$TMP/dl/flash/c.gguf" 100000 "$sha2" 2>&1); mm_rc=$?; set -e
 [ "$mm_rc" = 1 ] && [ ! -e "$TMP/dl/flash/c.gguf" ] && [ ! -e "$TMP/dl/flash/c.gguf.part" ] \
@@ -374,6 +385,19 @@ echo "== 10. models download: не-TTY без --yes → авто-нет rc 1"
 set +e; GFCTL_MODELS="$TMP/empty" ./gfctl models download 27b </dev/null >"$TMP/dl.out" 2>&1; dl_rc=$?; set -e
 [ "$dl_rc" = 1 ] && grep -q 'авто-нет' "$TMP/dl.out" \
   && ok "download без согласия → rc=1 «авто-нет»" || bad "download авто-нет (rc=$dl_rc)"
+# 2.1-F2: симлинк-веса (stat -L) — inventory не врёт «РАЗМЕР ≠», ensure_weights
+#   считает симлинк-сет полным (FAEX, EXP-005-faex: веса живут симлинками)
+mkdir -p "$TMP/linkset/27b" "$TMP/linktgt"
+truncate -s 1143006816 "$TMP/linktgt/draft.gguf"
+ln -s "$TMP/linktgt/draft.gguf" "$TMP/linkset/27b/Qwen3.8-27B-DFlash2-Q4_K_M.gguf"
+inv=$(GFCTL_MODELS="$TMP/linkset" ./gfctl models)
+grep -q 'DFlash2-Q4_K_M.gguf | 1143006816 B | есть, размер OK' <<<"$inv" \
+  && ok "inventory на симлинке: «размер OK» (stat -L), не «РАЗМЕР ≠»" || bad "inventory симлинк ($(grep 'DFlash2-Q4' <<<"$inv"))"
+truncate -s 14534384640 "$TMP/linktgt/main.gguf"
+ln -s "$TMP/linktgt/main.gguf" "$TMP/linkset/27b/qwen3.8-27b-IQ4_XS-pure.gguf"
+set +e; GFCTL_MODELS="$TMP/linkset" ./gfctl models download 27b </dev/null >"$TMP/ew.out" 2>&1; ew_rc=$?; set -e
+[ "$ew_rc" = 0 ] && ! grep -q 'Скачать недостающие' "$TMP/ew.out" && [ "$(grep -c 'SKIP:' "$TMP/ew.out")" = 2 ] \
+  && ok "ensure_weights на симлинк-сете: сет полный — без ask, 2×SKIP, rc 0" || bad "ensure_weights симлинк (rc=$ew_rc)"
 
 echo "== 11. doctor: деградация без GPU/podman, rc 0"
 set +e; ./gfctl doctor >"$TMP/doctor.out" 2>&1; doc_rc=$?; set -e

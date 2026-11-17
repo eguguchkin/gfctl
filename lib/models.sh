@@ -91,9 +91,11 @@ free_disk_gib() {
 #   (докачка следующим запуском).
 #
 # Ограничения/допущения: size/sha — пины из таблицы сета (не произвольные);
-#   несовместимый .part от прошлой сессии проявит себя как SHA-MISMATCH →
-#   удаление (само-восстановление); pre-flight сравнивает GiB с одним знаком
-#   через awk; curl без прогресс-метра (-sSL, флаги task.md).
+#   dest-симлинк разыменовывается в SKIP-проверке (stat -L — GNU stat без -L
+#   вернул бы размер ссылки ~91 B и ложную докачку, EXP-005-faex: веса живут
+#   симлинками); несовместимый .part от прошлой сессии проявит себя как
+#   SHA-MISMATCH → удаление (само-восстановление); pre-flight сравнивает GiB
+#   с одним знаком через awk; curl без прогресс-метра (-sSL, флаги task.md).
 #
 # @param 1: string   # url (https://… из таблицы или file:// для тестов)
 # @param 2: string   # dest — полный путь итогового файла
@@ -105,7 +107,7 @@ free_disk_gib() {
 download_file() {
   local url="$1" dest="$2" size="$3" sha="$4"
   local part="$dest.part" attempt remaining psz need_gib have_gib ok got
-  if [ -f "$dest" ] && [ "$(stat -c %s "$dest")" = "$size" ]; then
+  if [ -f "$dest" ] && [ "$(stat -L -c %s "$dest")" = "$size" ]; then
     echo "SKIP: $(basename "$dest") (размер совпал — честный sha-статус даёт: gfctl models)"
     return 0
   fi
@@ -153,8 +155,10 @@ download_file() {
 #   сеты — только чтение stat (SKIP-строки). rc 1, если хоть один файл не
 #   докачан.
 #
-# Ограничения/допущения: аргумент — сет ('27b' | 'flash'); «битый по
-#   размеру» ловится здесь и перекачивается через download_file; sha-битые
+# Ограничения/допущения: аргумент — сет ('27b' | 'flash'); размер читается
+#   stat -L (симлинк-веса FAEX — EXP-005-faex, без -L размер ссылки ≠ пин →
+#   ложный ask); «битый по размеру» ловится здесь и перекачивается через
+#   download_file; sha-битые
 #   размер-корректные файлы НЕ ловятся здесь (честный статус — inventory,
 #   перекачка — `gfctl models download`). Требует ask/download_file этого
 #   модуля и глобалы ASSUME_YES/MODELS_BASE. Сообщение ask печатает объём
@@ -170,7 +174,7 @@ ensure_weights() {
   dir=$(models_dir_for "$set")
   while IFS='|' read -r f size _sha _url _role; do
     [ -n "$f" ] || continue
-    actual=$(stat -c %s "$dir/$f" 2>/dev/null || echo 0)
+    actual=$(stat -L -c %s "$dir/$f" 2>/dev/null || echo 0)
     if [ "$actual" != "$size" ]; then need=1; missing_b=$((missing_b + size)); fi
   done < <(weights_for "$set") || return 1
   if [ "$need" = 1 ]; then
@@ -194,7 +198,8 @@ ensure_weights() {
 # Побочные эффекты: только чтение файлов сета и печать в stdout; ничего не
 #   меняет (mkdir НЕ делает).
 #
-# Ограничения/допущения: аргумент — сет; отсутствие каталога сета — норма
+# Ограничения/допущения: аргумент — сет; размер — stat -L (симлинк-веса,
+#   EXP-005-faex); отсутствие каталога сета — норма
 #   (все строки «НЕТ»); «есть, sha ✗» — случай размера за пределами перечня
 #   task.md, добавлен как честное завершение «sha-статуса» (см. dev-report).
 #
@@ -207,7 +212,7 @@ inventory() {
   while IFS='|' read -r f size sha _url _role; do
     [ -n "$f" ] || continue
     if [ -f "$dir/$f" ]; then
-      actual=$(stat -c %s "$dir/$f" 2>/dev/null || echo 0)
+      actual=$(stat -L -c %s "$dir/$f" 2>/dev/null || echo 0)
       if [ "$actual" = "$size" ]; then
         got=$(sha256sum "$dir/$f" 2>/dev/null | awk '{print $1}' || true)
         if [ "$got" = "$sha" ]; then
@@ -255,7 +260,8 @@ set_total_bytes() {
 # Побочные эффекты: только чтение stat файлов сета и печать в stdout.
 #
 # Ограничения/допущения: аргумент — сет; process substitution сохраняет
-#   счётчики (не субшелл); stat сбойного файла трактуется как отсутствие.
+#   счётчики (не субшелл); размер — stat -L (симлинк-веса, EXP-005-faex);
+#   stat сбойного файла трактуется как отсутствие.
 #
 # @param 1: weight_set      # каталог-сет
 # @stdout string            # «present total missing_bytes»
@@ -267,7 +273,7 @@ set_stats() {
     [ -n "$f" ] || continue
     total=$((total + 1))
     if [ -f "$dir/$f" ]; then
-      actual=$(stat -c %s "$dir/$f" 2>/dev/null || echo 0)
+      actual=$(stat -L -c %s "$dir/$f" 2>/dev/null || echo 0)
       if [ "$actual" = "$size" ]; then
         present=$((present + 1))
       else

@@ -96,6 +96,9 @@ $SSH "$GF_ACC_USER@$GF_ACC_HOST" 'bash -s' <<'REMOTE' || {
   GF="$HOME/gfctl-acc/gfctl"
   FLASH_DIR="$HOME/gfctl-acc-models/flash"
 
+  echo "== gfctl install.sh — bootstrap"
+  bash "$HOME/gfctl-acc-src/install.sh" || exit 44
+
   echo "== веса: симлинки существующих файлов окна FX (0 байт трафика)"
   mkdir -p "$FLASH_DIR"
   n=0
