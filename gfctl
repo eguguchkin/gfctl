@@ -1,0 +1,212 @@
+#!/usr/bin/env bash
+# === USAGE-BEGIN ===
+# gfctl — деплой и управление gufo-сервером (Strix Halo / gfx1151) на
+# Ubuntu/Debian. Раскладывается деревом: диспетчер gfctl + lib/*.sh + tpl/
+# (шаблоны юнитов/python-харнесов/фикстуры); запускается ОТ СВОЕГО ИМЕНИ
+# (не root; sudo применяется точечно):
+#   перенос каталога на машину && ./install.sh   # дерево в ~/gufo + симлинк в bin
+#
+# Команды:
+#   install [--profile P] [--port N] [--bind A] [--models-dir D] [--no-autostart]
+#                           — preflight → веса → юниты → старт → health →
+#                             smoke → автозапуск (идемпотентен)
+#   use <profile> [--sessions N] [--context N] [--no-probe]
+#                           — переключить профиль (+recreate)
+#   status [--json]         — профиль / health / роут / кэш / автозапуск
+#   logs [-f] [N]           — логи контейнера
+#   watch [--interval N]    — живой дашборд (/metrics, host, логи)     [этап 3]
+#   on | off                — автозапуск вкл / выкл (off = стоп + снятие;
+#                             файлы/веса/образ целы)
+#   uninstall [--purge-models] [--purge-image]
+#   bench                   — фикстура merge_sort (253c7ac5) ×3 по HTTP
+#   smoke                   — health + 3 запроса + роут из лога
+#   agent-check             — агентская самопроверка (SPEC §7)         [этап 3]
+#   cache [--verify]        — сводка кэша из логов + /metrics          [этап 3]
+#   doctor                  — диагностика без записи (гейты всех профилей)
+#   models [--check-types [сет|профиль]]
+#                           — инвентарь весов по сетам / pre-check GGUF-типов
+#   models download <сет|профиль> [--yes]
+#                           — докачка весов: pre-flight «нужно X GiB», curl
+#                             resume, sha256-verify после
+# Конфигурация (env переопределяет): GFCTL_IMAGE, GFCTL_DIR, GFCTL_MODELS,
+# GFCTL_PORT, GFCTL_BIND, GFCTL_YES.
+# === USAGE-END ===
+set -euo pipefail
+
+# ── конфигурация (env переопределяет) ───────────────────────────────────────
+# @type /^[\w./-]+:[\w.-]+$/ IMAGE="${GFCTL_IMAGE:-ghcr.io/gufo-org/toolboxes/gufo-runtime:latest}" # образ ghcr с тегом (форки запрещены — SPEC §1)
+IMAGE="${GFCTL_IMAGE:-ghcr.io/gufo-org/toolboxes/gufo-runtime:latest}"
+STACK_DIR="${GFCTL_DIR:-$HOME/gufo}"             # вся инсталляция здесь (диспетчер, lib/, tpl/, модели, кэш)
+MODELS_BASE="${GFCTL_MODELS:-$STACK_DIR/models}" # база весов; внутри — каталог-сет (27b, flash)
+# @type /^\d+$/              PORT="${GFCTL_PORT:-8080}"                              # TCP-порт сервера; переопределение — env GFCTL_PORT (D2)
+PORT="${GFCTL_PORT:-8080}"
+# @type /^[\d.]+$/           BIND="${GFCTL_BIND:-0.0.0.0}"                           # адрес bind (LAN без ключа); переопределение — env GFCTL_BIND
+BIND="${GFCTL_BIND:-0.0.0.0}"
+STOP_MARKER="$STACK_DIR/.gfctl-stopped"          # явная остановка: вотчдог не встаёт (F16)
+# @type /^[\w-]+$/           CONTAINER="${GFCTL_CONTAINER:-gufo}"                    # имя контейнера podman (rm+run recreate — SPEC §8)
+CONTAINER="${GFCTL_CONTAINER:-gufo}"
+UNIT_NAME=gfctl                                  # база имён юнитов: gfctl-serve.service, gfctl-watchdog.service/.timer
+LOGS_DIR="$STACK_DIR/logs"                       # watchdog/boot-события (контейнерные логи — podman logs)
+UNIT_DIR="$HOME/.config/systemd/user"            # systemd-user юниты (SPEC §2: вне каталога стека)
+SELF="$(readlink -f "$0")"
+LIB_DIR="$(cd "$(dirname "$SELF")" && pwd)/lib"  # дерево = рядом с диспетчером
+TPL_DIR="$(cd "$(dirname "$SELF")" && pwd)/tpl"
+
+# ── общие хелперы ────────────────────────────────────────────────────────────
+# Назначение: единый заголовок этапа — жирная голубая строка «== <текст>» в
+#   stdout (тела перенесены 1:1 из hfctl/hfctl).
+#
+# Побочные эффекты: запись в stdout (ANSI-раскраска безусловная, в том числе
+#   при не-TTY выводе) + leading-пустая строка перед заголовком. Файлы и
+#   состояние не меняет.
+#
+# Ограничения/допущения: не terminating (в отличие от die()); возвращает 0
+#   при успехе печати, сбой печати ловит set -e. Требует быть определённой в
+#   диспетчере (lib-модули зовут её без переопределений).
+#
+# @param 1..N: string[] # текст сообщения (аргументы соединяются через "$*")
+# @returns integer      # 0 при успехе печати; сбой печати прерывает set -e
+# @stdout string        # строка «== <текст>» с ANSI-обрамлением
+log()  { printf '\n\033[1;36m== %s\033[0m\n' "$*"; }
+
+# Назначение: единый формат предупреждения — печать текста в stderr с жёлтым
+#   префиксом «WARN:».
+#
+# Побочные эффекты: запись в stderr (ANSI-раскраска безусловная). Файлы и
+#   состояние не меняет; процесс не завершает.
+#
+# Ограничения/допущения: не terminating (предупреждение не отменяет команду);
+#   возвращает 0 при успехе печати.
+#
+# @param 1..N: string[] # текст сообщения (аргументы соединяются через "$*")
+# @returns integer      # всегда 0 — только печать; сбой печати ловит set -e
+# @stderr string        # строка «WARN: <текст>»
+warn() { printf '\033[1;33mWARN:\033[0m %s\n' "$*" >&2; }
+
+# Назначение: единый формат фатальной ошибки — печать текста в stderr с
+#   красным префиксом «FATAL:» и завершение процесса с кодом 1.
+#
+# Побочные эффекты: запись в stderr (ANSI-раскраска безусловная) + exit 1 —
+#   весь процесс диспетчера прекращается.
+#
+# Ограничения/допущения: никогда не возвращает управление — exit внутри
+#   функции; код отказа фиксирован: 1.
+#
+# @param 1..N: string[] # текст сообщения (аргументы соединяются через "$*")
+# @returns integer      # не возвращается — exit 1 внутри функции
+# @stderr string        # строка «FATAL: <текст>»
+die()  { printf '\033[1;31mFATAL:\033[0m %s\n' "$*" >&2; exit 1; }
+
+# ── неинтерактив: вопросы только при TTY (--yes / GFCTL_YES=1 — авто-да) ────
+# @type '' | '1' ASSUME_YES="${GFCTL_YES:-}" # '1' = авто-да (--yes / GFCTL_YES=1)
+ASSUME_YES="${GFCTL_YES:-}"
+
+# Назначение: интерактивный вопрос «да/нет» — 0 при ответе y, безопасный
+#   автоотказ (rc 1) в неинтерактивном контексте без --yes (SPEC: веса
+#   качаются только после согласия).
+#
+# Побочные эффекты: чтение stdin (read -r с prompt'ом); печать пояснения про
+#   авто-нет в stdout; файлы и глобалы не меняет.
+#
+# Ограничения/допущения: требует глобал ASSUME_YES этого файла ('1' —
+#   авто-да без вопроса); подтверждение — ровно строчная 'y' (пустой ввод,
+#   'Y', 'yes' — отказ); не terminating.
+#
+# @param 1: string # текст вопроса (prompt)
+# @returns integer # 0 — да (y или ASSUME_YES=1); 1 — нет/автоотказ
+ask() {  # ask <question> — 0 при да; при не-TTY и без --yes — отказ (безопасно)
+  [ "$ASSUME_YES" = 1 ] && return 0
+  if [ ! -t 0 ]; then echo "(неинтерактивный режим: авто-нет; повтори с --yes)"; return 1; fi
+  local a; read -r -p "$1" a; [ "$a" = y ]
+}
+
+# Назначение: предикат «строка — целое без знака» — ноль или больше цифр; rc
+#   0/1 вместо печати (используется в if/арифметических проверках).
+#
+# Побочные эффекты: ничего не печатает и не меняет — только возвращаемый код.
+#
+# Ограничения/допущения: пустая строка — НЕ целое (rc 1); ведущие нули
+#   допускаются; знак, пробелы и любые не-цифры — rc 1.
+#
+# @param 1: string    # проверяемое значение
+# @returns integer    # 0 — только цифры; 1 — иначе
+isint() { case "$1" in ''|*[!0-9]*) return 1 ;; *) return 0 ;; esac; }
+
+# ── lib-модули (порядок: от данных к командам; зависимости функций — lazy) ──
+# Назначение: подключение дерева lib/ — порядок source фиксирован и значим.
+#
+# Побочные эффекты: source выполняет код модулей в процессе диспетчера
+#   (определения функций + инициализация глобалов модулей: PROFILE_LIST,
+#   PROFILE_DEFAULT, set_27b, set_flash).
+#
+# Ограничения/допущения: порядок — читаемость «от данных к командам»:
+#   profiles (таблица) → models (веса) → state (канон .env) → serve
+#   (podman-строка/recreate) → units (рендер юнитов) → health (load/smoke) →
+#   autostart (on/off/watchdog/boot) → commands (cmd_*). Все модули содержат
+#   только функции — вызов позже source.
+source "$LIB_DIR/profiles.sh"   # таблица профилей + resolve + RAM-гейт-строки
+source "$LIB_DIR/models.sh"     # таблица весов + download + check-types
+source "$LIB_DIR/state.sh"      # канон профиля ~/gufo/.env (env > .env > дефолт)
+source "$LIB_DIR/serve.sh"      # serve-строка из таблицы + container_up (recreate)
+source "$LIB_DIR/units.sh"      # render_tpl + генерация systemd-user юнитов
+source "$LIB_DIR/health.sh"     # load_completed/http_ready/smoke (роут)
+source "$LIB_DIR/autostart.sh"  # on/off/up/down + _watchdog/_boot
+source "$LIB_DIR/commands.sh"   # models/doctor/status/install/use/logs/smoke/uninstall
+
+# Назначение: справка по командам диспетчера — печать шапки этого файла
+#   (текст между маркерами USAGE-BEGIN/USAGE-END) со снятым префиксом «# ».
+#
+# Побочные эффекты: только печать в stdout; читает сам файл диспетчера
+#   ($0); ничего не меняет.
+#
+# Ограничения/допущения: НЕ terminating — печатает и возвращает 0 (выход на
+#   совести вызывающего: ветка '' роутера ниже завершает процесс exit 1).
+#   Диапазон — маркеры USAGE-BEGIN/USAGE-END в шапке этого файла, НЕ номера
+#   строк (грабля старых версий): правка текста помощи не требует синхронной
+#   правки sed-аргумента.
+#
+# @returns integer # всегда 0 — только печать; сбой чтения/печати ловит set -e
+# @stdout string   # текст справки (текст между маркерами шапки)
+usage() {
+  sed -n '/^# === USAGE-BEGIN ===$/,/^# === USAGE-END ===$/p' "$0" | sed '1d;$d;s/^# \{0,1\}//'
+}
+
+# ── роутер команд (верхнеуровневый скоуп, не функция) ───────────────────────
+# Назначение: разбор $1 в команду и диспетчеризация на cmd_* из lib-модулей.
+#
+# Побочные эффекты: все побочные эффекты выбранной команды (она и завершает
+#   процесс своим rc); ветка '' печатает usage и завершает exit 1 (bare-вызов
+#   = отсутствие команды, контракт rc-отказов AGENTS.md); ветка «*» — отказ
+#   с выводом в stderr и rc 1; watch/cache/agent-check — die-заглушки этапа 3
+#   (грамматика CLI финальная с 1.1); bench — cmd_bench (этап 2.1).
+#
+# Ограничения/допущения: работает в верхнеуровневом скоупе диспетчера под
+#   set -euo pipefail: `shift || true` легализует запуск без аргументов;
+#   PROFILE_LIST в отказной ветке — из profiles.sh; _watchdog/_boot — скрытые
+#   внутренние команды systemd-юнитов (в usage не появляются).
+#
+# @param 1: string      # имя команды (см. usage; '' → usage)
+# @param 2..N: string[] # аргументы команды — передаются как есть ("$@")
+cmd="${1:-}"; shift || true
+case "$cmd" in
+  models)       cmd_models "$@" ;;
+  doctor)       cmd_doctor ;;
+  status)       cmd_status "$@" ;;
+  install)      cmd_install "$@" ;;
+  use)          cmd_use "$@" ;;
+  logs)         cmd_logs "$@" ;;
+  on)           cmd_on ;;
+  off|down)     cmd_off ;;
+  up)           cmd_up ;;
+  uninstall)    cmd_uninstall "$@" ;;
+  smoke)        cmd_smoke ;;
+  _watchdog)    cmd_watchdog ;;
+  _boot)        cmd_boot "$@" ;;
+  --help|-h)    usage; exit 0 ;;
+  bench)        cmd_bench "$@" ;;
+  watch|cache|agent-check)
+                die "команда '$cmd' — этап 3 (сейчас — каркас: грамматика CLI)" ;;
+  "")           usage; exit 1 ;;  # bare-вызов: usage и отказ rc=1
+  *)            echo "неизвестная команда '$cmd'. Команды: models [download <сет> | --check-types] | doctor | status [--json] | install | use | logs | watch | on | off | uninstall | bench | smoke | cache | agent-check." \
+                  " Профили: $PROFILE_LIST" >&2; exit 1 ;;
+esac

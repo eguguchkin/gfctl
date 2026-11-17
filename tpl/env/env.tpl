@@ -1,0 +1,8 @@
+# gfctl (сгенерировано; правки конфига — через gfctl install/use)
+GFCTL_PROFILE=__PROFILE__
+GFCTL_SESSIONS=__SESSIONS__
+GFCTL_CONTEXT=__CONTEXT__
+GFCTL_PORT=__PORT__
+GFCTL_BIND=__BIND__
+GFCTL_MODELS=__MODELS_DIR__
+GFCTL_IMAGE=__IMAGE__
