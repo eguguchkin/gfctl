@@ -37,9 +37,11 @@ part>pin (sha арбитр), --check-types die, json_str, WARN probe_context п�
    sha256:99e9b547…) + EXP-009 PASS (ребут: самоподъём gufo; инцидент выявил DEFECT
    serve-юнит-Environment → код закрыт r bc991f1 + **принят живым ребутом 2026-11-19 01:25**,
    journal чист). hipfire-прод возвращён (healthy 30 с).
-3. **Остался повтор на evo** (PLAN стр. 6: «этапы 2–4 — FAEX + повтор на evo»):
-   EXP-008 flavor 27b-single на 60 GiB + EXP-009 ребут — окно по GO (остановка hipfire-прода evo).
-4. Финал: пуш (пользователь), закрытие этапа 4. 4.3-хвост review r1 — fix-r1 ЗАКРЫТ (формулировки по F25, цитаты ggml.h 431–432, батарея 361/0).
+3. **Повтор на evo — ОПЦИЯ (PLAN стр. 6)**: FAEX-приёмки полные — доставка из **GitHub-клона 2cbb544**
+   (клон→install→use recreate→agent-check) + **живой ребут с юнит-Environment** (самоподъём, journal
+   чист) — 2026-11-19 ночь. evo-повтер (27b-single, 60 GiB) — при желании отдельным окном.
+4. Финал: пуш сделан пользователем. 4.3-хвост review r1 — fix-r1 ЗАКРЫТ (формулировки по F25,
+   цитаты ggml.h 431–432, батарея 361/0).
 
 Fix-round counter: F1–F4 + fix-r1 (hfctl) закрыты. Правило касания батареи: reuse=none ассерт (есть §45).
 
