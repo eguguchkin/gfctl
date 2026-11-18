@@ -60,3 +60,17 @@ Fix-round counter: F1–F4 + fix-r1 (hfctl) закрыты. Правило ка�
   перепланировки EXP-008/009.
 
 План: `.dev/PLAN.md` (4 этапа). Next: 4.2 backlog-polish → перепланировка EXP-008/009 → окна → финал этапа 4.
+
+## Напомнить завтра (2026-11-19, попросил пользователь «ты напомни»)
+
+1. **Watch-дашборд переделать**: текущий сделан криво; минимум — уровень hfctl-watch
+   (hipfire-аналог), цель — лучше: у gufo метрики отзывчивее. Логи: убрать `podman logs -f -t`
+   (время в строках уже есть), НО научить gufo писать время в TZ пользователя (сейчас UTC).
+2. **Лейаут директорий**: сейчас в home две папки (~/gfctl-gh клон + ~/gfctl-acc приёмка) —
+   схлопнуть в одну `~/gfctl/` c внутренним `~/gfctl/.runtime/…` (модели/кэш/всё из gfctl-acc).
+   Затрагивает: install.sh STACK_DIR, GFCTL_MODELS дефолт, юнит-Environment (r bc991f1),
+   EXP-скрипты путей, миграцию существующих машин.
+3. **Ревизия /home/ai на обеих машинах**: инвентаризация файлов/папок (gufo-models,
+   gfctl-acc-models, gufo-exp, halogen-*, halogen-cache, gfctl-acc, gfctl-acc-src, gfctl-gh,
+   src, hfctl-deploy, .local/share/containers…): что нужно / что удалить (вместе с этапом
+   «удаление дома hipfire» и учётом «evo-повтер опция»).
