@@ -41,7 +41,9 @@ rc_out() {
 #   curl    — лог URL; /ready rc 0 (GFCTL_FAUX_CURL_READYFAIL=1 → rc 7),
 #             /v1/completions — JSON с usage (FAILFIRST/FAILALL; счётчик
 #             GFCTL_FAUX_CNT.curl), chat-completions — скриптовый JSON
-#             (FAILFIRST: 1-й вызов падает, FAILALL: все падают);
+#             (FAILFIRST: 1-й вызов падает, FAILALL: все падают,
+#             EMPTYN="k[,k2]": вызов №k → ПУСТОЙ ответ rc 0 без тела —
+#             2.1-F4, ретрай пустого);
 #   sleep   — мгновенный (батарея быстрая).
 FAUX="$TMP/faux"; mkdir -p "$FAUX"
 FAUXLOG="$TMP/faux.log"; FAUXCNT="$TMP/faux.cnt"
@@ -119,6 +121,9 @@ case "$*" in
     n=$((n + 1)); echo "$n" > "$GFCTL_FAUX_CNT.curl"
     [ "${GFCTL_FAUX_CURL_FAILALL:-0}" = 1 ] && exit 7
     if [ "${GFCTL_FAUX_CURL_FAILFIRST:-0}" = 1 ] && [ "$n" = 1 ]; then exit 7; fi
+    # 2.1-F4: ПУСТОЙ ответ (rc 0, тела нет — smoke_resp.py упадёт на stdin)
+    # на вызове №k; список через запятую «1,2» — оба ретрая пустые
+    case ",${GFCTL_FAUX_CURL_EMPTYN:-}," in *",$n,"*) exit 0 ;; esac
     printf '{"choices":[{"message":{"content":"ок"}}]}'
     exit 0 ;;
 esac
@@ -188,6 +193,13 @@ LOGFAIL="$TMP/logfail"; printf 'event=listening\nmodel load error: OOM\n event=l
 LOGSP="$TMP/logspaces"
 printf 'event=listening address=http://0.0.0.0:8080\n' > "$LOGSP"
 printf '2026-11-17 [INFO] [loader] event=load_completed kind=text elapsed_ms=97399 monotonic_us=622886939311 model=Qwen3.8 Flash Next sessions=2 context_tokens=262144 speculative=mtp draft_limit=7 disk_cache=enabled rss_mib=2648\n' >> "$LOGSP"
+# 2.1-F4: сверка факта с заказом — успешная ступень в §26/§27 должна
+# отвечать context_tokens = заказанной (LOGOK имеет 262144 — на ступени
+# 163840/196608 это выглядело бы «тихим урезанием» и меняло канон)
+LOG1638="$TMP/log1638"
+printf 'event=load_completed speculative=dflash2 sessions=2 context_tokens=163840 model=qwen3.8-27b-IQ4_XS-pure\n' > "$LOG1638"
+LOG196="$TMP/log196"
+printf 'event=load_completed speculative=dflash2 sessions=2 context_tokens=196608 model=qwen3.8-27b-IQ4_XS-pure\n' > "$LOG196"
 
 echo "== 1. AGENTS internal checks: bash -n / py_compile"
 if bash -n gfctl lib/*.sh 2>&1; then ok "bash -n gfctl lib/*.sh"; else bad "bash -n gfctl lib/*.sh"; fi
@@ -723,7 +735,7 @@ set +e; out=$(frun logs 2>&1); lg2_rc=$?; set -e
 [ "$lg2_rc" = 1 ] && grep -q 'контейнера' <<<"$out" \
   && ok "logs: missing-контейнер → die rc 1" || bad "logs missing (rc=$lg2_rc)"
 
-echo "== 23. smoke: 3 запроса; ретрай РОВНО первого (F15); провал → rc 1"
+echo "== 23. smoke: 3 запроса; ретрай любого пустого ровно 1 раз (F15 + 2.1-F4); провал → rc 1"
 : > "$FAUXLOG"; rm -f "$FAUXCNT.curl"
 set +e; out=$(GFCTL_FAUX_INSPECT=running GFCTL_FAUX_PODMAN_LOGS="$LOGOK" frun smoke 2>&1); sm_rc=$?; set -e
 [ "$sm_rc" = 0 ] && grep -q 'SMOKE: OK' <<<"$out" \
@@ -736,7 +748,22 @@ set +e; out=$(GFCTL_FAUX_INSPECT=running GFCTL_FAUX_PODMAN_LOGS="$LOGOK" GFCTL_F
   && ok "ретрай первого: 2+1+1 = 4 curl-вызова, WARN, rc 0" || bad "smoke ретрай (rc=$sm2_rc, n=$(cat "$FAUXCNT.curl"))"
 : > "$FAUXLOG"; rm -f "$FAUXCNT.curl"
 set +e; out=$(GFCTL_FAUX_INSPECT=running GFCTL_FAUX_PODMAN_LOGS="$LOGOK" GFCTL_FAUX_CURL_FAILALL=1 frun smoke 2>&1); sm3_rc=$?; set -e
-[ "$sm3_rc" = 1 ] && ok "все запросы неудачны → rc 1" || bad "smoke провал (rc=$sm3_rc)"
+[ "$sm3_rc" = 1 ] && grep -q 'FATAL' <<<"$out" \
+  && ok "все запросы неудачны → rc 1 + FATAL" || bad "smoke провал (rc=$sm3_rc)"
+# 2.1-F4: пустой ответ на ВТОРОМ запросе → ровно 1 ретрай ЕГО ЖЕ, итог OK
+: > "$FAUXLOG"; rm -f "$FAUXCNT.curl"
+set +e; out=$(GFCTL_FAUX_INSPECT=running GFCTL_FAUX_PODMAN_LOGS="$LOGOK" GFCTL_FAUX_CURL_EMPTYN=2 frun smoke 2>&1); sm4_rc=$?; set -e
+[ "$sm4_rc" = 0 ] && grep -q 'SMOKE: OK' <<<"$out" && [ "$(cat "$FAUXCNT.curl")" = 4 ] \
+  && grep -q 'смоук-запрос 2 не ответил содержимым — повторяю' <<<"$out" \
+  && ok "пустой ВТОРОЙ запрос: 1 ретрай его же (3 запроса + 1 ретрай = 4 вызова), rc 0" \
+  || bad "smoke пустой второй (rc=$sm4_rc, вызовы=$(cat "$FAUXCNT.curl"))"
+# негатив 2.1-F4: запрос пуст ДВАЖДЫ → ok=0 → FATAL в конце (семантика «как
+# сейчас»: оставшиеся промпты всё равно прогоняются, die откладывается)
+: > "$FAUXLOG"; rm -f "$FAUXCNT.curl"
+set +e; out=$(GFCTL_FAUX_INSPECT=running GFCTL_FAUX_PODMAN_LOGS="$LOGOK" GFCTL_FAUX_CURL_EMPTYN=1,2 frun smoke 2>&1); sm5_rc=$?; set -e
+[ "$sm5_rc" = 1 ] && grep -q 'FATAL' <<<"$out" && [ "$(cat "$FAUXCNT.curl")" = 4 ] \
+  && ok "негатив: первый запрос пуст дважды (2 вызова) + остальные → FATAL rc 1" \
+  || bad "smoke оба пустые (rc=$sm5_rc, вызовы=$(cat "$FAUXCNT.curl"))"
 
 echo "== 24. uninstall: слои; модели и образ по умолчанию живы"
 gf 'install_units' >/dev/null 2>&1   # юниты для слоя 2 (off в §20 их снёс)
@@ -807,7 +834,7 @@ NO_W='ensure_weights(){ return 0; }'
 echo "== 26. probe 27b-multi: 196608 fail → 163840 ok; попытки по порядку; канон пары; успех БЕЗ второго run"
 rm -f "$TMP/stack/.env" "$FAUXCNT.ctx"; : > "$FAUXLOG"; rm -f "$FAUXCNT.curl"
 set +e
-out=$(GFCTL_LOADFAIL_AFTER=0 GFCTL_FAUX_CTX_LOGS="196608:$LOGFAIL 163840:$LOGOK 131072:$LOGOK" \
+out=$(GFCTL_LOADFAIL_AFTER=0 GFCTL_FAUX_CTX_LOGS="196608:$LOGFAIL 163840:$LOG1638 131072:$LOGOK" \
   gf "$GATE_OK
 cmd_use 27b-multi" 2>&1); pb_rc=$?; set -e
 [ "$pb_rc" = 0 ] && grep -q 'SMOKE: OK' <<<"$out" \
@@ -826,11 +853,34 @@ grep -q 'ступень 196608: попытка загрузки (sessions 2)' "$
   && grep -q 'ступень 163840: OK — канон' "$J26" && ! grep -q 'ступень 131072' "$J26" \
   && ok "журнал попыток: обе ступени с вердиктами; 131072 не достигнута (успех раньше)" || bad "журнал probe (26)"
 
+echo "== 26b. probe 2.1-F4 (EXP-006 evo): заказ 196608, движок ТИХО поднял 163840 — канон = ФАКТ + WARN, лестница СТОП"
+rm -f "$TMP/stack/.env" "$FAUXCNT.ctx"; : > "$FAUXLOG"
+set +e
+out=$(GFCTL_LOADFAIL_AFTER=0 GFCTL_FAUX_CTX_LOGS="196608:$LOG1638 163840:$LOGFAIL 131072:$LOGFAIL" \
+  gf "$GATE_OK
+$NO_W
+cmd_use 27b-multi" 2>&1); pt_rc=$?; set -e
+[ "$pt_rc" = 0 ] && grep -q 'SMOKE: OK' <<<"$out" \
+  && ok "урезание: rc 0 + SMOKE (fact-путь не ломает общий флоу use)" || { bad "probe факт (rc=$pt_rc)"; tail -8 <<<"$out"; }
+grep -q 'ступень 196608: движок поднял фактический 163840 — принимаю факт' <<<"$out" \
+  && grep -q '^WARN: probe: заказан контекст 196608, сервер поднялся на 163840' <<<"$out" \
+  && ok "обе цифры в строке попытки + WARN о тихом урезании в выводе" || bad "нет WARN/строки урезания (26b)"
+grep -q '^GFCTL_CONTEXT=163840$' "$TMP/stack/.env" && grep -q '^GFCTL_CTX_27b_multi_2=163840$' "$TMP/stack/.env" \
+  && ok "канон = ФАКТ 163840 (не заказ 196608): активные поля + пара-ключ" || bad "канон ≠ факт (26b)"
+[ "$(grep -c '^podman run' "$FAUXLOG")" = 1 ] && grep '^podman run' "$FAUXLOG" | grep -q -- '--context 196608' \
+  && ok "лестница СТОП после факта: ровно 1 run (--context 196608), меньшие ступени не запускались" \
+  || bad "лестница продолжилась после факта (26b)"
+grep -q 'ступень 196608: движок поднял фактический 163840 — принимаю факт' "$TMP/stack/logs/probe-27b-multi-2.log" \
+  && ! grep -q 'ступень 163840' "$TMP/stack/logs/probe-27b-multi-2.log" \
+  && ok "журнал попыток: обе цифры записаны; попытки 163840 НЕ было (стоп)" || bad "журнал урезания (26b)"
+grep -q 'канон записан: профиль 27b-multi, sessions 2, context 163840' <<<"$out" \
+  && ok "печать канона показывает ФАКТ 163840" || bad "печать канона (26b)"
+
 echo "== 27. probe flash-multi: 262144 fail → 229376 fail → 196608 ok"
 rm -f "$TMP/stack/.env" "$FAUXCNT.ctx"; : > "$FAUXLOG"
 set +e
 out=$(GFCTL_LOADFAIL_AFTER=0 \
-  GFCTL_FAUX_CTX_LOGS="262144:$LOGFAIL 229376:$LOGFAIL 196608:$LOGOK 163840:$LOGOK 131072:$LOGOK" \
+  GFCTL_FAUX_CTX_LOGS="262144:$LOGFAIL 229376:$LOGFAIL 196608:$LOG196 163840:$LOGOK 131072:$LOGOK" \
   gf "$GATE_OK
 $NO_W
 cmd_use flash-multi" 2>&1); pf_rc=$?; set -e

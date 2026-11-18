@@ -2,6 +2,10 @@
 # EXP-006-evo-probe — мини-окно на evo: живой probe-подбор 27b-multi
 # (196608 → 163840 → 131072) + bench ×3 + статус.
 #
+# ВАЖНО (инцидент 2026-11-18): remote-часть ОБЯЗАНА начинаться с bootstrap
+# install.sh — без него use идёт из СТАРОГО ~/gfctl-acc (1.2-код без probe)
+# и молча поднимает дефолт профиля (163840), маскируя probe (F21).
+#
 # Внешний эксперимент (BLOCKED-EXTERNAL): исполняется ТОЛЬКО на evo и ТОЛЬКО
 # по отдельному явному GO пользователя НА ЭТО окно — D6: любой запуск на evo
 # (даже read-only) требует явного «да»; «машина свободна» — информация, не
@@ -83,6 +87,9 @@ $SSH "$GF_ACC_USER@$GF_ACC_HOST" 'bash -s' <<'REMOTE' || {
   export GFCTL_DIR="$HOME/gfctl-acc" GFCTL_MODELS="$HOME/gfctl-acc-models" GFCTL_YES=1
   GF="$HOME/gfctl-acc/gfctl"
   ENVF="$HOME/gfctl-acc/.env"
+
+  echo "== gfctl install.sh — bootstrap (ОБЯЗАТЕЛЬНО: без него работает старый 1.2-код — F21)"
+  bash "$HOME/gfctl-acc-src/install.sh" || { echo "RESULT: FAIL — bootstrap rc=$?"; exit 51; }
 
   reset_pair_canon() {
     echo "--- .env до сброса:"; cat "$ENVF" 2>/dev/null || echo "(нет .env)"
