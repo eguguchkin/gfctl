@@ -35,9 +35,18 @@ PROFILE_DEFAULT=27b-single
 # restore/docq). '' = референс не снят → cmp_ref даёт WARN «эталон не снят»,
 # сравнение пропускается. Числа — AGENT-CONFIGS п.3 (окно HX-A, 27b-single);
 # flash-multi / 27b-multi / docq — после EXP-007 (окно этапа 3).
-ref_27b_single_session="23.8"    # сессия 15 ходов, total wall
-ref_27b_single_followup="1.7"    # follow-up 25k, turn2 wall (≤)
-ref_27b_single_restore="0.81"    # рестарт-restore @27k
+# Референсы сняты живьём agent-check'ом (EXP-007, evo 2026-11-18, 1×262144,
+# тёплая машина, протокол 25 POST — самосогласованный). Прежние 23.8/1.7/0.81
+# — смешение окон (flash-next CX): у gufo-27B follow-up/restore другие.
+ref_27b_single_session="30.44"   # сессия 15 ходов, total wall (ход 1 = prefill 14.8)
+ref_27b_single_followup="3.00"   # follow-up 25k, turn2 wall (k5 3.03 / k100 4.59)
+ref_27b_single_docq="3.60"       # [док 25k][q2] turn2 wall
+ref_27b_single_restore="2.85"    # рестарт-restore 25k turn2, reuse=disk
+# flash-multi — EXP-007 FAEX (2×262144, 2026-11-17→18):
+ref_flash_multi_session="17.22"
+ref_flash_multi_followup="1.58"
+ref_flash_multi_docq="10.44"
+ref_flash_multi_restore="1.89"
 # ref_<профиль>_docq НЕ снят ни для одного профиля (AGENT-CONFIGS имеет
 # только halogen-число — вне gufo); до EXP-007 — всегда WARN.
 

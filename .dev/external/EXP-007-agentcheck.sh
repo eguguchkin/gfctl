@@ -90,7 +90,7 @@ tar -C "$ROOT" --exclude=.git --exclude=.dev -cf - . | \
   $SSH "$GF_ACC_USER@$GF_ACC_HOST" 'tar -C ~/gfctl-acc-src -xf -' || {
   echo "RESULT: ERROR — ssh не прошёл"; exit 1; }
 
-$SSH "$GF_ACC_USER@$GF_ACC_HOST" 'bash -s' <<'REMOTE' || true
+$SSH "$GF_ACC_USER@$GF_ACC_HOST" "GF_ACC_FLAVOR=$GF_ACC_FLAVOR bash -s" <<'REMOTE'
 set -u
 export GFCTL_DIR="$HOME/gfctl-acc" GFCTL_MODELS="$HOME/gfctl-acc-models" GFCTL_YES=1
 GF="$HOME/gfctl-acc/gfctl"
@@ -132,4 +132,10 @@ echo "== off (дорога hfctl on)"
 REMOTE
 
 echo "== итог: смотри AGENT_CHECK_RC / CACHE_VERIFY_RC и блок REFS выше"
-echo "RESULT: PASS — если AGENT_CHECK_RC=0, CACHE_VERIFY_RC=0 и блок REFS/факт-база заполнены; иначе FAIL/ERROR"
+ac=${AC_RC:-1}; cv=${CV_RC:-1}
+[ "$ac" = 0 ] || { echo "RESULT: FAIL — agent-check rc=$ac"; exit 1; }
+[ "$cv" = 0 ] || { echo "RESULT: FAIL — cache --verify rc=$cv"; exit 1; }
+grep -q "^CHECK session " "$RES" && grep -q "^CHECK followup " "$RES" \
+  && grep -q "^CHECK docq " "$RES" && grep -q "^CHECK restore " "$RES" \
+  || { echo "RESULT: FAIL — CHECK-строки (session/followup/docq/restore) не сняты"; exit 1; }
+echo "RESULT: PASS — agent-check OK, cache --verify OK, CHECK-числа сняты (референсы ref_* заполняются оркестратором)"

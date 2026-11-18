@@ -1076,15 +1076,18 @@ cr=$(gf 'cmp_ref "follow-up 25k" 30 1.7 "проверь --cache-ram-bytes/--cach
 cr=$(gf 'cmp_ref "метка" 20 23.8 "hint"')
 [[ "$cr" == PASS* ]] && [[ "$cr" != *hint* ]] \
   && ok "cmp_ref: подсказка только у WARN-регрессии" || bad "cmp_ref hint у PASS (got: $cr)"
-[ "$(gf 'ref_get 27b-single session')" = "23.8" ] \
-  && [ "$(gf 'ref_get 27b-single followup')" = "1.7" ] \
-  && [ "$(gf 'ref_get 27b-single restore')" = "0.81" ] \
-  && ok "ref_get 27b-single: session=23.8 followup=1.7 restore=0.81 (AGENT-CONFIGS п.3)" || bad "ref_get 27b-single"
-[ -z "$(gf 'ref_get flash-multi session')" ] && [ -z "$(gf 'ref_get 27b-multi session')" ] \
-  && [ -z "$(gf 'ref_get 27b-multi followup')" ] \
-  && ok "ref_get мульти-профили: '' (не сняты — до EXP-007 WARN)" || bad "ref_get мульти"
-[ -z "$(gf 'ref_get 27b-single docq')" ] && [ -z "$(gf 'ref_get flash-multi docq')" ] \
-  && ok "ref_get docq: '' у всех профилей (вне gufo — до EXP-007)" || bad "ref_get docq"
+[ "$(gf 'ref_get 27b-single session')" = "30.44" ] \
+  && [ "$(gf 'ref_get 27b-single followup')" = "3.00" ] \
+  && [ "$(gf 'ref_get 27b-single restore')" = "2.85" ] \
+  && [ "$(gf 'ref_get 27b-single docq')" = "3.60" ] \
+  && ok "ref_get 27b-single: 30.44/3.00/2.85/3.60 (EXP-007 evo, живой агент-check)" || bad "ref_get 27b-single"
+[ "$(gf 'ref_get flash-multi session')" = "17.22" ] \
+  && [ "$(gf 'ref_get flash-multi followup')" = "1.58" ] \
+  && [ "$(gf 'ref_get flash-multi docq')" = "10.44" ] \
+  && [ "$(gf 'ref_get flash-multi restore')" = "1.89" ] \
+  && ok "ref_get flash-multi: 17.22/1.58/10.44/1.89 (EXP-007 FAEX)" || bad "ref_get flash-multi"
+[ -z "$(gf 'ref_get 27b-multi session')" ] && [ -z "$(gf 'ref_get 27b-multi followup')" ] \
+  && ok "ref_get 27b-multi: '' (мульти не снимался — вне окон; WARN «не снят» штатный)" || bad "ref_get мульти"
 
 echo "== 34. agent-check happy (faux): ровно 25 chat-POST, 4 CHECK-строки, сводка rc 0, порядок warn→rm"
 gf 'write_canon 27b-single 1 262144' >/dev/null 2>&1   # референсы 27b-single в cmp_ref
@@ -1095,17 +1098,17 @@ out=$(GFCTL_FAUX_INSPECT=running GFCTL_FAUX_PODMAN_LOGS="$LOGOK" \
   gf 'port_open(){ return 0; }
 warn(){ printf "WARN: %s\n" "$*" >> "$GFCTL_FAUX_LOG"; printf "WARN: %s\n" "$*" >&2; }
 cmd_agentcheck' 2>&1); ac_rc=$?; set -e
-[ "$ac_rc" = 0 ] && grep -q '^AGENT-CHECK: PASS=3 WARN=1 FAIL=0$' <<<"$out" \
-  && ok "agent-check: rc 0, сводка PASS=3 WARN=1 FAIL=0 (docq → WARN «не снят»)" \
+[ "$ac_rc" = 0 ] && grep -q '^AGENT-CHECK: PASS=4 WARN=0 FAIL=0$' <<<"$out" \
+  && ok "agent-check: rc 0, сводка PASS=4 WARN=0 FAIL=0 (faux-числа в окнах референсов)" \
   || { bad "agent-check happy (rc=$ac_rc)"; tail -12 <<<"$out"; }
 [ "$(grep -c '^CHECK ' <<<"$out")" = 4 ] \
   && ok "agent-check: ровно 4 CHECK-строки (session/followup/docq/restore)" || bad "CHECK-строки: $(grep -c '^CHECK ' <<<"$out")"
 [ "$(grep -c '/v1/chat/completions' "$FAUXLOG")" = 25 ] \
   && ok "agent-check: ровно 25 chat-POST (15+6+2+2)" || bad "chat-POST: $(grep -c '/v1/chat/completions' "$FAUXLOG")"
 grep -q 'PASS: сессия 15 ходов' <<<"$out" && grep -q 'PASS: follow-up 25k' <<<"$out" \
-  && grep -qE 'WARN: \[док 25k\] q2 [0-9.]+s — референс не снят' <<<"$out" \
+  && grep -q 'PASS: \[док 25k\] q2' <<<"$out" \
   && grep -q 'PASS: рестарт-restore' <<<"$out" \
-  && ok "вердики: сессия/follow-up/restore PASS, docq WARN «не снят»" || bad "вердики cmp_ref"
+  && ok "вердики: сессия/follow-up/docq/restore PASS (референсы EXP-007)" || bad "вердики cmp_ref"
 grep -q 'follow-up 5k' <<<"$out" && grep -q 'follow-up 100k' <<<"$out" \
   && ok "5k/100k напечатаны без сравнения" || bad "5k/100k строки"
 grep -q 'restore: reuse=live — disk-restore работает' <<<"$out" \

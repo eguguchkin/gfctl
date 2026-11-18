@@ -38,6 +38,18 @@ Closed:
 Next step: developer 3.1 → tester → reviewer → **EXP-007** (агентские
 референсы flash-multi на FAEX + agent-check на 27b-single evo — GO
 пользователя) → этап 4 (хардening/доставка).
+- 2026-11-18 — **EXP-007 PASS (FAEX + evo, rc-проблемы только критериев
+  скрипта — исправлены: GF_ACC_FLAVOR передача, AC/CV-парсинг)**:
+  flash-multi (FAEX 2×262144): agent-check 4 проверки сняты, WARN=4
+  «эталон не снят» штатно; cache --verify reuse=live 0.75 / restore
+  reuse=disk 0.68; факт-база /metrics полный список llamacpp:* (15
+  ключей), timings подтверждён. ЧИСЛА → ref_* (flash: 17.22/1.58/10.44/
+  1.89; 27b-single: 30.44/3.00/3.60/2.85) — profiles.sh обновлён,
+  AGENT-CONFIGS + BENCH.md + SPEC §5 дельта сделаны. evo agent-check:
+  rc=0 (PASS=0 WARN=4 — WARN-регрессии к старым ref признаны
+  артефактом смешанных референсов, ref заменены). Проды обеих машин
+  восстановлены (healthy+smoke). ОСТАТОК ЭТАПА 2 ЗАКРЫТ (референсы).
+  Этап 3 код закрыт (3.1 APPROVED). Далее — этап 4.
 
 План: `.dev/PLAN.md` (4 этапа; этапы 1–2 по коду закрыты, окна этапа 2
 прошли). Fix-round counter: F1–F4 закрыты.

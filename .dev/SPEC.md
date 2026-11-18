@@ -90,8 +90,11 @@ gfctl install             # preflight → веса → юниты → старт
 - Serve: `--speculative dflash2 --sessions 1 --context 262144
   --cache-ram-bytes 12884901888 --cache-disk <cache> --cache-disk-bytes
   68719476736`.
-- Референсы: фикстура **76.9 t/s** (draft 98.5%), агент-сессия **23.8 с**,
-  follow-up 25k ≤1.7 с, рестарт-restore 0.81 с @27k.
+- Референсы: фикстура **76.9 t/s** (draft 98.5%); agent-check (EXP-007
+  evo, 2026-11-18, тёплая машина): сессия 15 ходов **30.44 с**, follow-up
+  25k **3.00 с** (k5 3.03 / k100 4.59), [док 25k][q2] **3.60 с**,
+  рестарт-restore **2.85 с** reuse=disk. (Прежние 23.8/1.7/0.81 —
+  смешение окон flash-next, заменены живым снятием.)
 
 ### `27b-multi` (машина ≥56 GiB)
 - Веса те же. Serve: `--speculative dflash2 --sessions 2 --context
@@ -142,13 +145,15 @@ gufo не имеет hipfire-формата /health; роут читается �
 ## 7 · `gfctl agent-check` — агентская самопроверка
 
 1. **Сессия 15 ходов** (doc ~6.6k + Q→A, greedy, 128 ток, reasoning off) —
-   total wall + follow-up prompt_ms; референсы: 27b-single 23.8 с,
-   flash-multi — снять на этапе 2 (±25% → WARN).
-2. **Follow-up-лестница 5k/25k/100k**: turn2 wall (референс ≤1.7 с).
-3. **[док 25k][q1] → [док 25k][q2]**: q2 wall (референс по профилю из
-   AGENT-CONFIGS).
+   total wall; референсы (EXP-007, живое снятие): 27b-single 30.44 с,
+   flash-multi 17.22 с (±25% → WARN).
+2. **Follow-up-лестница 5k/25k/100k**: turn2 wall (референсы: 27b-single
+   3.00 с @25k; flash-multi 1.58 с).
+3. **[док 25k][q1] → [док 25k][q2]**: q2 wall (референсы: 27b-single
+   3.60 с; flash-multi 10.44 с).
 4. **Рестарт-restore**: рестарт контейнера → ход того же разговора
-   (референс ≤1 с @27k; проверяет cache-disk).
+   (референсы: 27b-single 2.85 с reuse=disk; flash-multi 1.89 с;
+   проверяет cache-disk).
 5. Сводка PASS/WARN/FAIL + подсказка причины (WARN follow-up → проверить
    `--cache-ram-bytes`/`--cache-disk`).
 
