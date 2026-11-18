@@ -97,8 +97,10 @@ free_disk_gib() {
 #   но битый по содержимому, словит SHA-MISMATCH и будет удалён.
 #
 # Побочные эффекты: файлы dest.part/dest в каталоге сета; сеть (curl);
-#   mkdir -p каталога сета (через free_disk_gib). Размер совпал → SKIP без
-#   сети. SHA-MISMATCH → dest И dest.part удаляются (битый файл не должен
+#   mkdir -p каталога сета (через free_disk_gib). Размер dest совпал → SKIP
+#   без сети; .part полного пин-размера → mv + sha-арбитраж без сети
+#   (part>pin, review 1.1 — локальное скачанное приоритетнее пин-сверки).
+#   SHA-MISMATCH → dest И dest.part удаляются (битый файл не должен
 #   выглядеть скачанным). Сетевой отказ 3 попыток → rc 1, .part остаётся
 #   (докачка следующим запуском).
 #
@@ -128,9 +130,19 @@ download_file() {
     return 0
   fi
   remaining="$size"
+  ok=""
   if [ -f "$part" ]; then
     psz=$(stat -c %s "$part" 2>/dev/null || echo 0)
     if [ "$psz" -gt 0 ] && [ "$psz" -le "$size" ]; then remaining=$((size - psz)); fi
+    # part>pin (review 1.1): локальный .part уже ПОЛНОГО пин-размера (обрыв
+    # между концом скачивания и mv) — докачка его НЕ перекрывает и сеть не
+    # дёргает: mv + sha-арбитраж в общем хвосте ниже. Битый «полный» .part
+    # словит SHA-MISMATCH и будет удалён — финальный арбитр sha256, как и
+    # для сетевых попыток.
+    if [ "$psz" = "$size" ]; then
+      log "локальный $(basename "$part") уже полного размера ($size B) — сеть не нужна"
+      ok=1
+    fi
   fi
   need_gib=$(awk -v b="$remaining" 'BEGIN{printf "%.1f", b/1073741824}')
   have_gib=$(free_disk_gib "$(dirname "$dest")")
@@ -139,27 +151,28 @@ download_file() {
     warn "мало места: нужно ${need_gib} GiB, свободно ${have_gib} GiB — отказ ДО трафика"
     return 1
   fi
-  ok=""
-  for attempt in 1 2 3; do
-    if [ -n "$mirror" ] && [ "$attempt" = 1 ]; then
-      try_url="$mirror/$(basename "$dest")"
-      log "качаю (попытка 1/3, зеркало): $(basename "$dest") ← $try_url"
-      pre_size=$(stat -c %s "$part" 2>/dev/null || echo 0)
-      mrc=0; http_code=$(curl -sSL -C - --connect-timeout 10 -o "$part" -w '%{http_code}' "$try_url") || mrc=$?
-      if [ "$mrc" = 0 ]; then
-        case "$http_code" in
-          2*|000) log "зеркало ответило годным файлом (http ${http_code:-?})"; ok=1; break ;;
-          *)      mrc=1 ;;   # rc 0, но http ≥400 (или пустой) — фоллбэк
-        esac
+  if [ -z "$ok" ]; then
+    for attempt in 1 2 3; do
+      if [ -n "$mirror" ] && [ "$attempt" = 1 ]; then
+        try_url="$mirror/$(basename "$dest")"
+        log "качаю (попытка 1/3, зеркало): $(basename "$dest") ← $try_url"
+        pre_size=$(stat -c %s "$part" 2>/dev/null || echo 0)
+        mrc=0; http_code=$(curl -sSL -C - --connect-timeout 10 -o "$part" -w '%{http_code}' "$try_url") || mrc=$?
+        if [ "$mrc" = 0 ]; then
+          case "$http_code" in
+            2*|000) log "зеркало ответило годным файлом (http ${http_code:-?})"; ok=1; break ;;
+            *)      mrc=1 ;;   # rc 0, но http ≥400 (или пустой) — фоллбэк
+          esac
+        fi
+        # битый/частичный хвост зеркала не должен ломать resume пин-URL
+        if [ "$pre_size" -gt 0 ]; then truncate -s "$pre_size" "$part" 2>/dev/null || true; else rm -f "$part"; fi
+        warn "зеркало не ответило годным файлом (rc=$mrc, http=${http_code:-?}) — фоллбэк на пин-URL"
       fi
-      # битый/частичный хвост зеркала не должен ломать resume пин-URL
-      if [ "$pre_size" -gt 0 ]; then truncate -s "$pre_size" "$part" 2>/dev/null || true; else rm -f "$part"; fi
-      warn "зеркало не ответило годным файлом (rc=$mrc, http=${http_code:-?}) — фоллбэк на пин-URL"
-    fi
-    log "качаю (попытка $attempt/3): $(basename "$dest") ← $url"
-    if curl -sSL -C - --retry 4 --retry-delay 5 --connect-timeout 20 -o "$part" "$url"; then ok=1; break; fi
-    [ "$attempt" -lt 3 ] && sleep 15
-  done
+      log "качаю (попытка $attempt/3): $(basename "$dest") ← $url"
+      if curl -sSL -C - --retry 4 --retry-delay 5 --connect-timeout 20 -o "$part" "$url"; then ok=1; break; fi
+      [ "$attempt" -lt 3 ] && sleep 15
+    done
+  fi
   if [ -z "$ok" ]; then
     warn "скачивание не удалось за 3 попытки — $part сохранён для докачки"
     return 1
@@ -327,8 +340,9 @@ set_stats() {
 #
 # Ограничения/допустимости: аргумент — сет; ни одного скачанного файла →
 #   die «нечего проверять» rc 1; контракт красных типов — числовой
-#   (RED = {16,17,18,19,22,25,26} ∪ {t>29} ТОЛЬКО на ffn_*-тензорах),
-#   validated F3; rc: 0 — зелёный, 1 — красный/ошибка формата.
+#   (RED = {16,17,18,19,22,29} ∪ {t>29} ТОЛЬКО на ffn_*-тензорах; канон
+#   ggml enum: IQ1_M=29, BF16=30 — display-имена в парсере), validated
+#   F3 + живьём EXP-005 (F20); rc: 0 — зелёный, 1 — красный/ошибка формата.
 #
 # @param 1: weight_set      # каталог-сет
 # @stdout string[]          # вердикты файлов + финальная строка сета
@@ -353,7 +367,7 @@ check_types() {
     die "нечего проверять — веса сета $set не скачаны ($dir)"
   fi
   if [ "$red" = 1 ] || [ "$err" = 1 ]; then
-    echo "КРАСНЫЙ — не загрузится (FFN IQ2_S/IQ3_XXS/неизвестные; SPEC §5)"
+    echo "КРАСНЫЙ — не загрузится (FFN низкобитные IQ/BF16/MXFP4/неизвестные; SPEC §5)"
     return 1
   fi
   echo "зелёный — сет $set можно грузить"

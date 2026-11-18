@@ -13,6 +13,13 @@ tensor-infos, данных нет): детерминированные байт�
   gguf_ffn_q4_k.gguf       ffn-тензор type 12 (Q4_K)       → зелёный, rc 0
   gguf_ffn_unknown31.gguf  ffn-тензор type 31 (unknown>29) → RED, rc 1
   gguf_attn_iq2_xs.gguf    risky type 17 (IQ2_XS) вне ffn  → зелёный + WARN, rc 0
+  gguf_ffn_iq1_m.gguf      ffn-тензор type 29 (IQ1_M)      → RED, rc 1 (4.2:
+                           прежний контракт {25,26} ловил I16/I32, а IQ1_M
+                           пропускал — канон 29=IQ1_M, review 1.1 Q1)
+  gguf_ffn_i16.gguf        ffn-тензор type 25 (I16)        → зелёный, rc 0
+                           (I-типы — целые/служебные, не весовые форматы)
+  gguf_indexer_bf16.gguf   type 30 (BF16) вне ffn (indexer — F20)
+                                                          → зелёный + WARN, rc 0
   gguf_not_gguf.gguf       магия ≠ GGUF                    → rc 2
   gguf_truncated.gguf      n_kv=5, данные оборваны         → rc 2 (обрезанные)
   gguf_kv_nested.gguf      KV-массив массивов              → rc 2 (не поддерж.)
@@ -93,6 +100,18 @@ FIXTURES = {
         [kv_u32(b"qwen3.block_count", 28)],
         [tinfo(b"blk.0.attn_v.weight", (2048, 2048), 17, 0),
          tinfo(b"blk.0.attn_k.weight", (2048, 2048), 0, 4096)],
+    ),
+    "gguf_ffn_iq1_m.gguf": gguf(
+        [],
+        [tinfo(b"blk.0.ffn_up.weight", (8192, 8192), 29, 0)],
+    ),
+    "gguf_ffn_i16.gguf": gguf(
+        [],
+        [tinfo(b"blk.0.ffn_gate.weight", (2048, 8192), 25, 0)],
+    ),
+    "gguf_indexer_bf16.gguf": gguf(
+        [],
+        [tinfo(b"blk.0.indexer.weight", (2048, 64), 30, 0)],
     ),
     "gguf_not_gguf.gguf": b"RIFX" + b"\x00" * 64,
     "gguf_truncated.gguf": (header(5, 1) + gstr(b"general.architecture"))[:32],

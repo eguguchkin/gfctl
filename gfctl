@@ -8,8 +8,10 @@
 #
 # Команды:
 #   install [--profile P] [--port N] [--bind A] [--models-dir D] [--no-autostart]
-#                           — preflight → веса → юниты → старт → health →
-#                             smoke → автозапуск (идемпотентен)
+#                           — preflight → веса → probe-подбор контекста
+#                             (мульти, если канона пары нет) → юниты →
+#                             старт → health → smoke → автозапуск
+#                             (идемпотентен)
 #   use <profile> [--sessions N] [--context N] [--no-probe]
 #                           — переключить профиль (+recreate)
 #   status [--json]         — профиль / health / роут / кэш / автозапуск

@@ -55,7 +55,7 @@ gfctl install             # preflight → веса → юниты → старт
 
 | Команда | Действие |
 |---|---|
-| `gfctl install [--profile P] [--port N] [--bind A] [--models-dir D] [--no-autostart]` | Preflight → скачивание весов профиля (размер + sha256 до и после) → **probe-подбор контекста** (для мульти-профилей) → генерация юнитов → старт → health → smoke → **автозапуск** (если не `--no-autostart`). Идемпотентен. Preflight memlock-гейт — по порогу достаточности 8388608 kB (4.1-F2, не по «unlimited»): ml ≥ порога → limits.d-файл перезаписан + WARN, install продолжается; ml < порога или нечитаемый → файл + WARN «перелогинься» + exit 42 |
+| `gfctl install [--profile P] [--port N] [--bind A] [--models-dir D] [--no-autostart]` | Preflight → скачивание весов профиля (размер + sha256 до и после) → **probe-подбор контекста** (для мульти-профилей; при уже зафиксированном каноне пары или на healthy-повторе — пропускается: идемпотентность; 4.2) → генерация юнитов → старт → health → smoke → **автозапуск** (если не `--no-autostart`). Идемпотентен. Preflight memlock-гейт — по порогу достаточности 8388608 kB (4.1-F2, не по «unlimited»): ml ≥ порога → limits.d-файл перезаписан + WARN, install продолжается; ml < порога или нечитаемый → файл + WARN «перелогинься» + exit 42 |
 | `gfctl use 27b-single\|27b-multi\|flash-multi [--sessions N] [--context N] [--no-probe]` | Проверка гейтов → ленивый добор весов → **probe-подбор** (если не `--no-probe`) → перегенерация юнита → recreate → health → smoke. Канон профиля заменяется |
 | `gfctl status [--json]` | Профиль, health, **фактический роут** (speculative=mtp/dflash2, sessions, context — из лога `load_completed`), состояние кэша (ram/disk), автозапуск, версия образа |
 | `gfctl logs [-f] [N]` | Логи контейнера |
@@ -66,7 +66,7 @@ gfctl install             # preflight → веса → юниты → старт
 | `gfctl agent-check` | **Агентская самопроверка** (см. §7): сессия 15 ходов, follow-up-лестница 5k/25k/100k, [док][вопрос], рестарт-restore — wall-цифры + сравнение с референсами (WARN при регрессии >25%) |
 | `gfctl cache [--verify]` | Сводка кэша из логов (configured/skipped/evicted) + `/metrics` cached_total; `--verify` — контрольный follow-up + рестарт-проба |
 | `gfctl doctor` | Диагностика без записи: ОС, /dev/kfd, render-группа, memlock, linger, RAM-гейты всех профилей (цифрами), диск под веса, порт, **gpu-lock** (кто держит /dev/kfd — предупреждение о hfctl-проде) |
-| `gfctl models [--check-types]` | Скачано vs требуется по профилям, sha-статус, свободное место; `--check-types` — pre-check GGUF-типов (IQ2_S/IQ3_XXS/неизвестные в FFN → КРАСНЫЙ «не загрузится») |
+| `gfctl models [--check-types]` | Скачано vs требуется по профилям, sha-статус, свободное место; `--check-types [сет|профиль]` — pre-check GGUF-типов (низкобитные IQ — IQ1_S/IQ1_M/IQ2_*/IQ3_XXS —, BF16/MXFP4/неизвестные в FFN → КРАСНЫЙ «не загрузится»; display-имена — канон ggml enum, BF16=30 — F20, 4.2; лишние аргументы → die) |
 | `gfctl uninstall [--purge-models] [--purge-image]` | Слоёная зачистка: контейнер, юниты, `~/gufo` (модели щадятся по умолчанию); `limits.d/99-gfctl-memlock.conf` НЕ трогается (4.1-F2: безвреден, переживает uninstall ради будущих relogin) |
 
 ## 4 · Модель состояний
@@ -129,8 +129,9 @@ gfctl install             # preflight → веса → юниты → старт
 **Запреты (hard rules):**
 - unsloth UD-* GGUF для 27B — запрещены (не грузятся); flash-next
   UD-Q4_K_XL — единственный разрешённый UD; при смене ревизии —
-  обязательный `gfctl models --check-types` (GGUF-типы: IQ2_S/IQ3_XXS/
-  неизвестные в FFN → отказ).
+  обязательный `gfctl models --check-types` (GGUF-типы: низкобитные IQ/
+  BF16/MXFP4/неизвестные в FFN → отказ; IQ2_S/IQ3_XXS — валидированные
+  убийцы, F3/F20).
 - `mmproj` не качается (агентский профиль текстовый; `--with-vision` — бэклог).
 - RAM-гейты: `flash-multi` <110 GiB — отказ ДО трафика (на 64 GB машине
   flash невозможен: только веса 111 GB); `27b-*` <56 GiB — отказ.

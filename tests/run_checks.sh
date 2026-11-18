@@ -319,6 +319,15 @@ expect_rc 2 "метаданные > 64 MiB → rc 2"  "$TMP/fix/gguf_meta_budget
 expect_rc 2 "n_kv > 1e6 (санити) → rc 2"  "$TMP/fix/gguf_meta_overflow.gguf"
 warn_out=$(python3 tpl/python/gguf_type_check.py "$TMP/fix/gguf_attn_iq2_xs.gguf")
 grep -q '^WARN:' <<<"$warn_out" && ok "WARN-строка для risky вне ffn" || bad "нет WARN-строки для risky вне ffn"
+# 4.2 п.3: канон ggml enum (review 1.1 Q1 + F20) — граница RED и display-имена
+expect_rc 1 "ffn IQ1_M (29) → КРАСНЫЙ (канон 29=IQ1_M; прежний контракт пропускал)" "$TMP/fix/gguf_ffn_iq1_m.gguf"
+expect_rc 0 "ffn I16 (25) → зелёный (25=I16 — не весовой формат)" "$TMP/fix/gguf_ffn_i16.gguf"
+expect_rc 0 "indexer BF16 (30) вне ffn → зелёный + WARN (F20)" "$TMP/fix/gguf_indexer_bf16.gguf"
+nm1=$(python3 tpl/python/gguf_type_check.py "$TMP/fix/gguf_ffn_iq1_m.gguf") || true
+grep -q '= IQ1_M$' <<<"$nm1" && ok "display-имя канон: 29 → IQ1_M" || bad "display 29: $(grep 'RED:' <<<"$nm1")"
+nm2=$(python3 tpl/python/gguf_type_check.py "$TMP/fix/gguf_indexer_bf16.gguf") || true
+grep -q '= BF16 (вне ffn' <<<"$nm2" && ! grep -q 'unknown' <<<"$nm2" \
+  && ok "display-имя канон: 30 → BF16 (не unknown(30); F20 indexer)" || bad "display 30: $nm2"
 
 echo "== 5. check-types уровень gfctl (красный сет → rc 1 + КРАСНЫЙ)"
 mkdir -p "$TMP/m/27b"
@@ -337,6 +346,9 @@ set +e; GFCTL_MODELS="$TMP/mempty" ./gfctl models --check-types >"$TMP/ct.out" 2
 set +e; GFCTL_MODELS="$TMP/m" ./gfctl models --check-types flash >"$TMP/ct.out" 2>&1; ct_rc=$?; set -e
 [ "$ct_rc" = 1 ] && grep -q 'нечего проверять' "$TMP/ct.out" \
   && ok "check-types flash (не скачан) → rc=1" || bad "check-types flash не скачан (rc=$ct_rc)"
+set +e; GFCTL_MODELS="$TMP/m" ./gfctl models --check-types 27b extra >"$TMP/ct.out" 2>&1; ct_rc=$?; set -e
+[ "$ct_rc" = 1 ] && grep -q 'лишние аргументы' "$TMP/ct.out" \
+  && ok "check-types: лишний аргумент → die (review 1.1 №8; 4.2 п.5)" || bad "check-types лишний арг (rc=$ct_rc)"
 
 echo "== 6. профильная таблица: 9 полей × 3 профиля = литералам task.md"
 pp() { ( MODELS_BASE="$TMP/m"; source lib/profiles.sh; "$@" ); }
@@ -461,6 +473,30 @@ set +e; dlf_out=$(dlf "file://$TMP/srv/blob2" "$TMP/dl/flash/c.gguf" 100000 "$sh
 [ "$mm_rc" = 1 ] && [ ! -e "$TMP/dl/flash/c.gguf" ] && [ ! -e "$TMP/dl/flash/c.gguf.part" ] \
   && grep -q 'SHA-MISMATCH' <<<"$dlf_out" \
   && ok "SHA-MISMATCH → rc 1, dest+.part удалены" || bad "SHA-MISMATCH (rc=$mm_rc)"
+# 4.2 п.4 (part>pin): .part ПОЛНОГО пин-размера (обрыв между концом скачивания
+# и mv) — докачка его не перекрывает: mv + sha без сети
+cp "$TMP/srv/blob1" "$TMP/dl/flash/done.gguf.part"
+set +e; dlf_out=$(dlf "file://$TMP/srv/blob1" "$TMP/dl/flash/done.gguf" 200000 "$sha1" 2>&1); fp_rc=$?; set -e
+[ "$fp_rc" = 0 ] && grep -q 'уже полного размера (200000 B) — сеть не нужна' <<<"$dlf_out" \
+  && [ ! -e "$TMP/dl/flash/done.gguf.part" ] && cmp -s "$TMP/dl/flash/done.gguf" "$TMP/srv/blob1" \
+  && ok "part>pin: полный .part → mv+sha БЕЗ сети, .part поглощён" || bad "part>pin полный (rc=$fp_rc)"
+head -c 200000 /dev/urandom > "$TMP/dl/flash/bad.gguf.part"
+set +e; dlf_out=$(dlf "file://$TMP/srv/blob1" "$TMP/dl/flash/bad.gguf" 200000 "$sha1" 2>&1); bp_rc=$?; set -e
+[ "$bp_rc" = 1 ] && grep -q 'SHA-MISMATCH' <<<"$dlf_out" && [ ! -e "$TMP/dl/flash/bad.gguf.part" ] \
+  && ok "part>pin негатив: битый «полный» .part → SHA-MISMATCH и удаление (sha арбитр)" || bad "part>pin негатив (rc=$bp_rc)"
+cp "$TMP/srv/blob1" "$TMP/dl/flash/netfree.gguf.part"
+: > "$FAUXLOG"
+dlf_netfree() { ( PATH="$FAUX:$PATH" MODELS_BASE="$TMP/dl" GFCTL_MIRROR_BASE="dlmirror://nas.lan/MIRROR200"
+          export GFCTL_FAUX_LOG="$FAUXLOG" GFCTL_FAUX_CNT="$FAUXCNT" \
+                  GFCTL_FAUX_MIRROR_SRC GFCTL_FAUX_PIN_SRC
+          log()  { echo "LOG: $*"; }; warn() { echo "WARN: $*" >&2; }; die() { echo "DIE: $*" >&2; exit 1; }
+          source lib/models.sh; download_file "$@" ); }
+set +e
+GFCTL_FAUX_MIRROR_SRC="$TMP/srv/blob1" GFCTL_FAUX_PIN_SRC="$TMP/srv/blob2" \
+  out=$(dlf_netfree "dlpin://hf.test/PINOK/netfree.gguf" "$TMP/dl/flash/netfree.gguf" 200000 "$sha1" 2>&1); nf_rc=$?; set -e
+[ "$nf_rc" = 0 ] && grep -q 'PASS: netfree.gguf (sha OK)' <<<"$out" \
+  && ! grep -qE 'dlpin|dlmirror' "$FAUXLOG" \
+  && ok "part>pin: сеть НЕ дёргалась (в faux-логе нет curl-вызовов)" || bad "part>pin без сети (rc=$nf_rc)"
 echo "== 10. models download: не-TTY без --yes → авто-нет rc 1"
 set +e; GFCTL_MODELS="$TMP/empty" ./gfctl models download 27b </dev/null >"$TMP/dl.out" 2>&1; dl_rc=$?; set -e
 [ "$dl_rc" = 1 ] && grep -q 'авто-нет' "$TMP/dl.out" \
@@ -950,6 +986,9 @@ cmd_use 27b-multi" 2>&1); pt_rc=$?; set -e
 grep -q 'ступень 196608: движок поднял фактический 163840 — принимаю факт' <<<"$out" \
   && grep -q '^WARN: probe: заказан контекст 196608, сервер поднялся на 163840' <<<"$out" \
   && ok "обе цифры в строке попытки + WARN о тихом урезании в выводе" || bad "нет WARN/строки урезания (26b)"
+grep -q '^WARN: probe: .*F21' <<<"$out" && ! grep -q 'урезание движком' <<<"$out" \
+  && ok "WARN факт-пути не обвиняет движок (F21): причина — старый код диспетчера (4.2 п.7)" \
+  || bad "WARN F21-атрибуция (26b)"
 grep -q '^GFCTL_CONTEXT=163840$' "$TMP/stack/.env" && grep -q '^GFCTL_CTX_27b_multi_2=163840$' "$TMP/stack/.env" \
   && ok "канон = ФАКТ 163840 (не заказ 196608): активные поля + пара-ключ" || bad "канон ≠ факт (26b)"
 [ "$(grep -c '^podman run' "$FAUXLOG")" = 1 ] && grep '^podman run' "$FAUXLOG" | grep -q -- '--context 196608' \
@@ -997,6 +1036,8 @@ cmp -s "$TMP/stack/.env" "$TMP/env.before" \
   && ok "отказ probe НЕ портит .env (ни пар-ключа, ни полей — свойство отката)" || bad ".env испорчен отказом"
 [ "$(grep -c '^podman run' "$FAUXLOG")" = 3 ] \
   && ok "полный отказ: ровно 3 попытки (лестница целиком)" || bad "число попыток (28)"
+grep -q '^  лог: .*event=load_failed reason=oom' "$TMP/stack/logs/probe-27b-multi-2.log" \
+  && ok "журнал probe: хвост движкового лога дописан после отказа (4.2 п.2)" || bad "журнал без хвоста лога (28)"
 set +e
 out=$(GFCTL_LOADFAIL_AFTER=0 \
   GFCTL_FAUX_CTX_LOGS="262144:$LOGFAIL 229376:$LOGFAIL 196608:$LOGFAIL 163840:$LOGFAIL 131072:$LOGFAIL" \
@@ -1518,6 +1559,97 @@ grep -q 'зеркало весов (GFCTL_MIRROR_BASE): https://nas.lan/gguf' <<
 doct0=$(gf 'cmd_doctor')
 ! grep -q 'зеркало весов' <<<"$doct0" \
   && ok "doctor: без GFCTL_MIRROR_BASE строки зеркала нет" || bad "doctor: лишняя строка зеркала"
+
+# ══ 4.2 backlog-polish: install-probe / JSON-escape / reuse=none ═════════════
+
+echo "== 43. install-probe (4.2 п.1, SPEC §3): мульти без канона пары → probe по лестнице; повтор с каноном → пропуск; single → без probe"
+rm -f "$TMP/stack/.env" "$FAUXCNT.ctx"; : > "$FAUXLOG"; rm -f "$FAUXCNT.curl"
+set +e
+out=$(GFCTL_LOADFAIL_AFTER=0 GFCTL_FAUX_CTX_LOGS="196608:$LOGFAIL 163840:$LOG1638 131072:$LOGOK" \
+  gf "$GATE_OK
+$NO_W
+gpu_nodes_present(){ return 0; }
+ulimit(){ echo unlimited; }
+cmd_install --profile 27b-multi" 2>&1); ip_rc=$?; set -e
+[ "$ip_rc" = 0 ] && grep -q 'SMOKE: OK' <<<"$out" \
+  && grep -q 'install: канона пары (27b-multi × 2) нет — probe-подбор по лестнице' <<<"$out" \
+  && ok "install-probe: rc 0 + probe объявлен + SMOKE" || { bad "install-probe (rc=$ip_rc)"; tail -8 <<<"$out"; }
+grep -q '^GFCTL_PROFILE=27b-multi$' "$TMP/stack/.env" && grep -q '^GFCTL_SESSIONS=2$' "$TMP/stack/.env" \
+  && grep -q '^GFCTL_CONTEXT=163840$' "$TMP/stack/.env" && grep -q '^GFCTL_CTX_27b_multi_2=163840$' "$TMP/stack/.env" \
+  && ok "install-probe: канон пары записан (профиль+sessions+context+пара-ключ)" || bad "install-probe канон"
+mapfile -t ipruns < <(grep '^podman run' "$FAUXLOG")
+[ "${#ipruns[@]}" = 2 ] && [[ ${ipruns[0]} == *'--context 196608'* ]] && [[ ${ipruns[1]} == *'--context 163840'* ]] \
+  && ok "install-probe лестница по порядку: 196608 fail → 163840 ok; РОВНО 2 run (успех без recreate)" \
+  || bad "install-probe run-линии: $(grep -c '^podman run' "$FAUXLOG")"
+grep -q 'ступень 163840: OK — канон' "$TMP/stack/logs/probe-27b-multi-2.log" \
+  && ok "install-probe: журнал попыток ведётся" || bad "install-probe журнал"
+n_ip1=$(grep -c '^podman run' "$FAUXLOG")
+set +e
+out=$(GFCTL_FAUX_PODMAN_LOGS="$LOG1638" gf "$GATE_OK
+$NO_W
+gpu_nodes_present(){ return 0; }
+ulimit(){ echo unlimited; }
+cmd_install --profile 27b-multi" 2>&1); ip2_rc=$?; set -e
+[ "$ip2_rc" = 0 ] && grep -q 'install: канон пары (27b-multi × 2): context 163840 — probe пропущен' <<<"$out" \
+  && ok "повтор install: канон пары есть → probe пропущен (идемпотентность)" || { bad "повтор install-probe (rc=$ip2_rc)"; tail -6 <<<"$out"; }
+[ "$(grep -c '^podman run' "$FAUXLOG")" = "$((n_ip1 + 1))" ] \
+  && ok "повтор install: ровно один recreate, без пере-перебора лестницы" || bad "повтор install run Δ"
+rm -f "$TMP/stack/.env" "$FAUXCNT.ctx"; : > "$FAUXLOG"
+set +e
+out=$(GFCTL_FAUX_PODMAN_LOGS="$LOGOK" gf "$GATE_OK
+$NO_W
+gpu_nodes_present(){ return 0; }
+ulimit(){ echo unlimited; }
+cmd_install --profile 27b-single" 2>&1); ip3_rc=$?; set -e
+[ "$ip3_rc" = 0 ] && ! grep -q 'probe-подбор' <<<"$out" && [ ! -e "$TMP/stack/logs/probe-27b-single-1.log" ] \
+  && ok "install single: probe нет (лестница '-')" || bad "install single probe (rc=$ip3_rc)"
+
+echo "== 44. status --json: экранирование спецсимволов (4.2 п.6)"
+set +e
+GFCTL_BIND='a"b\c' GFCTL_PORT=8198 ./gfctl status --json > "$TMP/status_esc.json" 2>&1; se_rc=$?; set -e
+if [ "$se_rc" = 0 ] && python3 -m json.tool "$TMP/status_esc.json" >/dev/null 2>&1 \
+   && grep -Fq '"bind":"a\"b\\c"' "$TMP/status_esc.json"; then
+  ok "status --json: кавычки/бэкслеши в bind экранированы, документ валиден"
+else
+  bad "status --json escape (rc=$se_rc)"; cat "$TMP/status_esc.json"
+fi
+LOGQ="$TMP/logq"
+printf 'event=load_completed speculative=dflash2 sessions=1 context_tokens=262144 model=%s sessions=1\n' 'Bad"Na\me' > "$LOGQ"
+python3 - <<'PYEOF' &
+import socket, time
+s = socket.socket()
+s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+s.bind(("127.0.0.1", 8098)); s.listen(5)
+time.sleep(40)
+PYEOF
+QLID=$!
+sleep 0.4
+set +e
+GFCTL_FAUX_INSPECT=running GFCTL_FAUX_PODMAN_LOGS="$LOGQ" GFCTL_PORT=8098 \
+  frun status --json > "$TMP/status_q.json" 2>&1; q_rc=$?; set -e
+python3 - "$TMP/status_q.json" <<'EOF' && ok "status --json живой: model с кавычкой/бэкслешем экранирован, json валиден" || bad "status --json model escape (rc=$q_rc)"
+import json, sys
+d = json.load(open(sys.argv[1], encoding="utf-8"))
+assert d["route"]["model"] == 'Bad"Na\\me', d
+assert d["health"] == "ok", d
+EOF
+kill "$QLID" 2>/dev/null || true
+wait "$QLID" 2>/dev/null || true
+
+echo "== 45. reuse=none ассерт (4.2 п.8, правило STATE): кэш не переиспользуется → restore FAIL, rc 1"
+gf 'write_canon 27b-single 1 262144' >/dev/null 2>&1
+: > "$FAUXLOG"; rm -f "$FAUXCNT.curl"
+set +e
+out=$(GFCTL_FAUX_INSPECT=running GFCTL_FAUX_PODMAN_LOGS="$LOGOK" \
+  GFCTL_FAUX_CURL_TIMINGS=1 GFCTL_FAUX_CURL_REUSE=none \
+  gf 'port_open(){ return 0; }
+cmd_agentcheck' 2>&1); rn_rc=$?; set -e
+[ "$rn_rc" = 1 ] && grep -q '^FAIL: disk-restore не сработал (reuse=none)' <<<"$out" \
+  && grep -q '^AGENT-CHECK: PASS=4 WARN=0 FAIL=1$' <<<"$out" \
+  && ok "reuse=none: restore FAIL + сводка FAIL=1 + rc 1 (кэш не переиспользуется)" \
+  || { bad "reuse=none ассерт (rc=$rn_rc)"; tail -6 <<<"$out"; }
+grep -q '^PASS: рестарт-restore' <<<"$out" && ! grep -q 'disk-restore работает' <<<"$out" \
+  && ok "reuse=none: ok-строк live/disk нет (харнес не лжёт о переиспользовании)" || bad "reuse=none ok-строки"
 
 printf 'ИТОГО: PASS=%s FAIL=%s\n' "$PASS" "$FAIL"
 [ "$FAIL" = 0 ]

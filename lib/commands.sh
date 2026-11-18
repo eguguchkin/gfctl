@@ -29,6 +29,27 @@ resolve_set() {
   esac
 }
 
+# Назначение: экранирование строки для безопасной вставки в JSON-вывод
+#   (status --json; review 1.1 №9 / бэклог 4.2 п.6): \ → \\, " → \",
+#   таб/перевод строки/CR → \t/\n/\r — спецсимволы в именах/путях (env
+#   GFCTL_BIND/GFCTL_DIR, имя модели из лога) больше не ломают документ.
+#
+# Побочные эффекты: только печать в stdout; ничего не меняет.
+#
+# Ограничения/допущения: чистая функция; прочие управляющие символы (< 0x20)
+#   не экранируются (в именах моделей/путях инсталляции не встречаются —
+#   живой источник кавычек/пробелов — имена gufo, F20).
+#
+# @param 1: string    # исходная строка
+# @stdout string     # содержимое JSON-строки (БЕЗ обрамляющих кавычек)
+# @returns integer   # всегда 0
+json_str() {
+  local s="$1"
+  s=${s//\\/\\\\}; s=${s//\"/\\\"}
+  s=${s//$'\t'/\\t}; s=${s//$'\n'/\\n}; s=${s//$'\r'/\\r}
+  printf '%s' "$s"
+}
+
 # Назначение: TCP-проба порта сервера — 0, если что-то слушает на
 #   127.0.0.1:$1 (health «отвечает»), 1 иначе («не запущен»).
 #
@@ -111,6 +132,9 @@ cmd_models() {
     --check-types)
       shift
       local target="${1:-}" set_name
+      # review 1.1 №8 (бэклог 4.2 п.5): лишний аргумент после [сет|профиль]
+      # молча игнорировался — теперь die, единообразно с status
+      [ -n "${2:-}" ] && die "models --check-types: лишние аргументы после '${1:-}' — доступно: --check-types [сет|профиль]"
       if [ -z "$target" ]; then
         set_name=$(profile_field "$(cur_profile)" 1)
       else
@@ -279,7 +303,7 @@ cmd_status() {
     ROUTE_SPEC=""; ROUTE_SESSIONS=""; ROUTE_CTX=""; ROUTE_MODEL=""
   fi
   if [ -n "$ROUTE_SPEC" ] && [ -n "$ROUTE_SESSIONS" ] && [ -n "$ROUTE_CTX" ]; then
-    route_j="{\"speculative\":\"$ROUTE_SPEC\",\"sessions\":$ROUTE_SESSIONS,\"context\":$ROUTE_CTX,\"model\":\"$ROUTE_MODEL\"}"
+    route_j="{\"speculative\":\"$(json_str "$ROUTE_SPEC")\",\"sessions\":$ROUTE_SESSIONS,\"context\":$ROUTE_CTX,\"model\":\"$(json_str "$ROUTE_MODEL")\"}"
     route_line="$ROUTE_SPEC, sessions $ROUTE_SESSIONS, ctx $ROUTE_CTX"
   else
     route_j="null"; route_line="—"
@@ -302,12 +326,12 @@ cmd_status() {
       version=$(podman inspect -f '{{.ImageName}}' "$CONTAINER" 2>/dev/null || true)
     fi
   fi
-  if [ -n "$version" ]; then version_j="\"$version\""; else version_j="null"; fi
+  if [ -n "$version" ]; then version_j="\"$(json_str "$version")\""; else version_j="null"; fi
   if [ -n "$cache_dir" ] && [ -d "$cache_dir" ]; then
     cache_b=$(du -sb "$cache_dir" 2>/dev/null | awk '{print $1}') || true
     if [ -n "$cache_b" ]; then
       local cache_gib; cache_gib=$(awk -v b="$cache_b" 'BEGIN{printf "%.1f", b/1073741824}')
-      cache_j="{\"dir\":\"$cache_dir\",\"bytes\":$cache_b,\"gib\":$cache_gib}"
+      cache_j="{\"dir\":\"$(json_str "$cache_dir")\",\"bytes\":$cache_b,\"gib\":$cache_gib}"
       cache_line="$cache_dir ($cache_gib GiB)"
     fi
   fi
@@ -328,8 +352,8 @@ cmd_status() {
     if [ "$p27" = "$t27" ]; then c27=true; else c27=false; fi
     if [ "$pf" = "$tf" ]; then cf=true; else cf=false; fi
     printf '{"profile":"%s","stack":"%s","bind":"%s","port":%s,"health":"%s","route":%s,"autostart":%s,"version":%s,"gates":{%s},"models":{"27b":{"present":%s,"total":%s,"complete":%s},"flash":{"present":%s,"total":%s,"complete":%s}},"cache":%s}\n' \
-      "$prof" "$stack" "$bind" "$port" "$health" "$route_j" "$auto_j" \
-      "$version_j" "$gates" \
+      "$(json_str "$prof")" "$(json_str "$stack")" "$(json_str "$bind")" "$port" \
+      "$(json_str "$health")" "$route_j" "$auto_j" "$version_j" "$gates" \
       "$p27" "$t27" "$c27" "$pf" "$tf" "$cf" "$cache_j"
   else
     printf 'профиль: %s | health: %s | автозапуск: %s | роут: %s | кэш: %s | веса %s: %s/%s\n' \
@@ -355,8 +379,16 @@ cmd_status() {
 #   recreate («healthy — recreate не нужен»: до-проверка весов SKIP, юниты
 #   перегенерируются, автозапуск — НОЛЬ podman run; мёртвый/загружающийся
 #   сервер → штатный путь ниже) → ensure_weights (ask, полные сеты — SKIP
-#   без вопросов) → install_units (рендер юнитов — всегда, даже с
-#   --no-autostart) → write_canon → container_up → wait_health 180 (роут
+#   без вопросов) → SPEC §3 probe-подбор контекста (4.2 п.1): мульти-профиль
+#   (лестница есть) + НЕ healthy + канона пары нет → probe_context (лестница,
+#   каждая попытка env-оверрайд, канон на диске не меняется; отказ всей
+#   лестницы = die «это тоже результат», как в use); канон пары есть →
+#   «probe пропущен»; single/healthy → поле 4 таблицы (write_canon не
+#   регрессирует найденный ранее канон: ctx = probe > канон пары > поле 4) →
+#   install_units (рендер юнитов — всегда, даже с
+#   --no-autostart) → write_canon → контейнер: probe-путь УЖЕ поднят
+#   (env-оверрайд) → wait_health без recreate (как use); healthy →
+#   «recreate не нужен»; иначе container_up → wait_health 180 (роут
 #   печатает) → smoke → --no-autostart? «автозапуск выключен» :
 #   autostart_on. Повтор поверх работающего healthy = SKIP весов +
 #   перерендер юнитов + автозапуск, контейнер не тронут.
@@ -453,13 +485,36 @@ cmd_install() {
       die "порт $(canon_port) уже слушает ЧУЖОЕ — освободи порт или выбери другой: gfctl install --port N"
     fi
   fi
-  local set_name; set_name=$(profile_field "$prof" 1)
+  local set_name eff_sessions ctx probe_path=0 ladder
+  set_name=$(profile_field "$prof" 1)
+  eff_sessions=$(profile_field "$prof" 3)
   log "веса: сет $set_name"
   ensure_weights "$set_name" || die "веса сета $set_name не докачаны/битые — см. WARN выше (повтор: gfctl models download $set_name)"
+  # SPEC §3 «probe-подбор контекста (для мульти-профилей)» (4.2 п.1, backlog
+  # review 2.1): лестница есть (мульти), сервер ещё НЕ поднят (healthy-путь
+  # идемпотентности не трогаем — 0 podman run) и канона пары нет (повторный
+  # install не пере-перебирает найденное probe'ом, как и use). Порядок
+  # SPEC-строки соблюдён: веса → probe → юниты → write_canon → старт.
+  ladder=$(profile_field "$prof" 8)
+  ctx=$(canon_pair_context "$prof" "$eff_sessions")
+  if [ "$healthy" = 0 ] && [ -n "$ladder" ] && [ "$ladder" != "-" ] && [ -z "$ctx" ]; then
+    log "install: канона пары ($prof × $eff_sessions) нет — probe-подбор по лестнице: $ladder"
+    probe_context "$prof" "$eff_sessions"
+    ctx="$PROBE_CTX"
+    probe_path=1
+  elif [ -n "$ctx" ]; then
+    log "install: канон пары ($prof × $eff_sessions): context $ctx — probe пропущен"
+  else
+    ctx=$(profile_field "$prof" 4)
+  fi
   install_units
-  write_canon "$prof" "$(profile_field "$prof" 3)" "$(profile_field "$prof" 4)"
+  write_canon "$prof" "$eff_sessions" "$ctx"
   if [ "$healthy" = 1 ]; then
     echo "healthy — recreate не нужен (веса SKIP, юниты перегенерированы, podman run: 0)"
+  elif [ "$probe_path" = 1 ]; then
+    log "контейнер поднят probe-попыткой (env-оверрайд) — recreate не нужен, health сразу"
+    wait_health 180
+    smoke
   else
     log "старт контейнера (recreate = rm+run)"
     container_up "$prof"
@@ -500,18 +555,21 @@ probe_log() { printf '%s\n' "$*" | tee -a "${PROBE_JOURNAL:?probe_log: журн�
 #   GFCTL_LOADFAIL_AFTER — решено в 1.2), таймаут 180с, успех (wait_load
 #   rc 0 — «загрузилась»; /ready+smoke идут в общем флоу cmd_use). Успех
 #   сверяется с заказом: ROUTE_CTX (факт из load_completed) ≠ заказанная
-#   ступень → канон = ФАКТ + WARN, лестница СТОП (тихое урезание движком,
-#   EXP-006/2.1-F4: gufo при нехватке RAM-cache урезает контекст без отказа).
+#   ступень → канон = ФАКТ + WARN, лестница СТОП (страховка 2.1-F4; урезаний
+#   движок НЕ делает — F21: расхождение заказа с фактом наблюдено только со
+#   старым кодом диспетчера на машине, EXP-006 без bootstrap).
 #   Загрузившаяся ступень (или факт) → глобал PROBE_CTX + rc 0. Все отказали →
-#   таблица попыток (журнал) в stderr + die с подсказкой --context (sessions=4 →
+#   таблица попыток + хвосты движковых логов (журнал) в stderr + die с
+#   подсказкой --context (sessions=4 →
 #   --context 65536: floor 4×65536 проверен (F6), но 65536 в лестнице нет —
 #   OQ-2a). Отказ podman run за GFCTL_RUN_ATTEMPTS — infra-отказ (занятый
 #   порт и т.п.): container_up сам die, в таблицу попыток не попадает.
 #
 # Побочные эффекты: mkdir -p $LOGS_DIR; журнал попыток
 #   $LOGS_DIR/probe-<профиль>-<sessions>.log (обнуляется на старте; probe_log
-#   дублирует каждую строку в stdout); podman rm/run на каждую попытку
-#   (пауза F10 — встроенная в container_up); ПИШЕТ глобалы
+#   дублирует каждую строку в stdout; после ОТКАЗа ступени в журнал
+#   дописывается хвост движкового лога — 4.2 п.2); podman rm/run на каждую
+#   попытку (пауза F10 — встроенная в container_up); ПИШЕТ глобалы
 #   PROBE_CTX/PROBE_JOURNAL.
 #
 # Ограничения/допущения: зовётся из cmd_use только когда канона пары нет и
@@ -535,16 +593,18 @@ probe_context() {
   for step in $ladder; do
     probe_log "ступень $step: попытка загрузки (sessions $sessions)"
     if GFCTL_SESSIONS="$sessions" GFCTL_CONTEXT="$step" container_up "$prof" && wait_load 180; then
-      # 2.1-F4 (EXP-006 evo): gufo при нехватке места под RAM-cache ТИХО
-      # урезает контекст (заказ 196608 → load_completed context_tokens=163840;
-      # явный admission-отказ бывает только при полном «0 MiB», F13/F20).
-      # ROUTE_CTX заполнил последний parse_route в wait_load — факт ≠ заказ →
-      # канон = ФАКТ, лестницу не продолжаем: факт и есть фактический максимум
-      # при данном состоянии машины. факт > заказ невозможен, но принимается
-      # так же (ветка симметрична).
+      # 2.1-F4 — страховка «канон = факт» (EXP-006 evo): ROUTE_CTX заполнил
+      # последний parse_route в wait_load; факт ≠ заказ → канон = ФАКТ,
+      # лестницу не продолжаем: факт и есть фактическое состояние сервера.
+      # ВАЖНО (F21, переписано): УРЕЗАНИЙ движок НЕ делает — проверена вся
+      # цепочка gufo (serve → runner): только валидация с явным отказом,
+      # load_completed печатает ровно заказанное; наблюдённое расхождение
+      # (196608 → 163840) — СТАРЫЙ код диспетчера на машине (EXP-006 без
+      # bootstrap install.sh), не движок. факт > заказ невозможен, но
+      # принимается так же (ветка симметрична).
       if [ -n "$ROUTE_CTX" ] && [ "$ROUTE_CTX" != "$step" ]; then
         probe_log "ступень $step: движок поднял фактический $ROUTE_CTX — принимаю факт"
-        warn "probe: заказан контекст $step, сервер поднялся на $ROUTE_CTX (тихое урезание движком) — канон $ROUTE_CTX, большие ступени лестницы не продолжаю"
+        warn "probe: заказан контекст $step, сервер поднялся на $ROUTE_CTX — расхождение заказа с фактом; движок урезаний НЕ делает (F21: только валидация с явным отказом) — типичная причина: на машине старый код диспетчера, обнови дерево (./install.sh); канон $ROUTE_CTX, большие ступени лестницы не продолжаю"
         PROBE_CTX="$ROUTE_CTX"
         return 0
       fi
@@ -558,6 +618,10 @@ probe_context() {
       verdict="таймаут 180с"
     fi
     probe_log "ступень $step: ОТКАЗ — $verdict"
+    # 4.2 п.2: admission-цифры/причина отказа живут в движковом логе —
+    # дописываем хвост в журнал (в stdout wait_load его уже показал), иначе
+    # следующая попытка перезатирает лог контейнера и цифры теряются
+    podman logs --tail 12 "$CONTAINER" 2>&1 | sed 's/^/  лог: /' >> "$PROBE_JOURNAL" || true
   done
   echo "попытки probe (журнал: $PROBE_JOURNAL):" >&2
   sed 's/^/  /' "$PROBE_JOURNAL" >&2
@@ -577,8 +641,9 @@ probe_context() {
 #   WARN «беру канон пары»; пуст + --no-probe → WARN «беру последнюю
 #   ступень лестницы» (загрузка НЕ проверена); пуст + лестница '-' → поле 4
 #   таблицы (27b-single, как 1.2); иначе probe_context (перебор лестницы,
-#   первая загрузившаяся ступень; ступень может быть ТИХО урезана движком —
-#   канон = фактический ROUTE_CTX, 2.1-F4). Затем write_canon (ОБА представления:
+#   первая загрузившаяся ступень; при расхождении заказа с фактом канон =
+#   фактический ROUTE_CTX — страховка 2.1-F4, урезаний движок не делает,
+#   F21). Затем write_canon (ОБА представления:
 #   активные поля + пара-ключ) → контейнер: probe-путь УЖЕ поднят попыткой
 #   (env-оверрайд дал байт-в-байт ту же serve-строку) → wait_health сразу,
 #   БЕЗ второго recreate (экономия до 94 с загрузки, F5); остальные пути —
