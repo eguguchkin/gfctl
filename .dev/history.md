@@ -20,3 +20,9 @@
   сразу, gufo healthy (http 200) через ~85 с после старта контейнера; финал — возврат hipfire-прода
   (health_http=000 в срезах — монитор смотрит порт 8080 gufo, корректно). Вывод: без defect-фикса
   (render Environment в юнит-tpl) каждый ребут acc-инсталляции = вечный activating.
+- **DEFECT serve-юнит-Environment: ПРИНЯТ ЖИВЫМ РЕБУТОМ (2026-11-19 01:25)**: FAEX ребут с
+  gfctl-serve enabled (юнит перерендерен r bc991f1, Environment=GFCTL_DIR/GFCTL_MODELS вшиты) →
+  юнит active сразу, gufo поднят юнитом (рук. команд 0), health ok (Loading → ok), journal
+  чист от statfs/FATAL/cannot stat (0 вхождений). Финал: gfctl off → hfctl on → HEALTHY 30 с,
+  linger on. **DEFECT ЗАКРЫТ.** Попутно: EXP-008/009-инцидент pull-висяка повторно подтвердил
+  лечение kill+retry (второй podman run: «incomplete layer deleting» → докачка 2.8 GB → ок).
