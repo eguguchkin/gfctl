@@ -1,7 +1,10 @@
 # локальный мусор
 *.swp
 *~
-.local-analysis/
+.codegraph/
+__pycache__/
 tpl/python/__pycache__/
+# локальный анализ (лабораторные артефакты)
+.local-analysis/
 # прогоны EXP-окон (result-артефакты; сами EXP-скрипты — в git)
 .dev/external/*.result.txt
