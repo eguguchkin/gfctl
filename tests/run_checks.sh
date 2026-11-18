@@ -615,6 +615,8 @@ ulimit(){ echo unlimited; }
 cmd_install --profile 27b-single' 2>&1); in_rc=$?; set -e
 [ "$in_rc" = 0 ] && grep -q 'SMOKE: OK' <<<"$out" && grep -q 'автозапуск ВКЛ' <<<"$out" \
   && ok "install happy-path → rc 0 (health + smoke + автозапуск)" || { bad "install happy-path (rc=$in_rc)"; tail -5 <<<"$out"; }
+! grep -q 'WARN: memlock' <<<"$out" \
+  && ok "memlock-гейт 4.1-F2 (в): ml=unlimited → PASS без WARN" || bad "(в) unlimited дал memlock-WARN"
 CANON_RUN="podman run -d --name gufo --device /dev/kfd --device /dev/dri --group-add keep-groups --ipc=host --ulimit memlock=-1:-1 --userns=keep-id:uid=1000,gid=1000 -p 0.0.0.0:8080:8080 -v $TMP/stack/models/27b:/models:ro -v $TMP/stack/cache/27b-single:/cache ghcr.io/gufo-org/toolboxes/gufo-runtime:latest $CANON_ARGS"
 grep -Fxq "$CANON_RUN" "$FAUXLOG" \
   && ok "podman run в faux-логе = канонической строке Design (байт-в-байт)" || bad "podman run ≠ канону"
@@ -655,6 +657,26 @@ cmd_install --profile 27b-single' 2>&1); in2_rc=$?; set -e
 n_run2=$(grep -c '^podman run -d' "$FAUXLOG")
 [ "$((n_run2 - n_run1))" = 1 ] && ok "повтор install: ровно один recreate (run +1, дублей нет)" || bad "повтор install run Δ=$((n_run2 - n_run1))"
 [ "$(ls "$ud" | wc -l)" = 3 ] && ok "повтор install: юнит-файлов по-прежнему 3" || bad "дубли юнитов"
+
+echo "== 17b. memlock-гейт 4.1-F2 (EXP-008): порог 8388608 kB вместо «unlimited»"
+: > "$FAUXLOG"; rm -f "$FAUXCNT" "$FAUXCNT.curl"
+set +e; out=$(GFCTL_FAUX_PODMAN_LOGS="$LOGOK" gf 'gpu_nodes_present(){ return 0; }
+ram_gate_line(){ printf "%s: ≥N GiB — есть 999.0: OK\n" "$1"; }
+ulimit(){ echo 1318060032; }
+cmd_install --profile 27b-single' 2>&1); g1_rc=$?; set -e
+[ "$g1_rc" = 0 ] && grep -q 'WARN: memlock 1318060032 kB — достаточно (порог 8388608 kB)' <<<"$out" \
+  && grep -q 'sudo tee /etc/security/limits.d/99-gfctl-memlock.conf' "$FAUXLOG" \
+  && ok "(а) ml=1318060032 ≥ порога: install ПРОДОЛЖИЛ (rc 0), WARN «достаточно», файл перезаписан" \
+  || { bad "(а) ml=1318060032 (rc=$g1_rc)"; tail -4 <<<"$out"; }
+: > "$FAUXLOG"; rm -f "$FAUXCNT" "$FAUXCNT.curl"
+set +e; out=$(gf 'gpu_nodes_present(){ return 0; }
+ram_gate_line(){ printf "%s: ≥N GiB — есть 999.0: OK\n" "$1"; }
+ulimit(){ echo 1000; }
+cmd_install --profile 27b-single' 2>&1); g2_rc=$?; set -e
+[ "$g2_rc" = 42 ] && grep -q 'ПЕРЕЛОГИНЬСЯ' <<<"$out" \
+  && grep -q 'sudo tee /etc/security/limits.d/99-gfctl-memlock.conf' "$FAUXLOG" \
+  && ok "(б) ml=1000 < порога: exit 42 + запись limits.d-файла" \
+  || { bad "(б) ml=1000 (rc=$g2_rc)"; tail -4 <<<"$out"; }
 
 echo "== 18. use: гейты → ленивая докачка → канон → recreate → health → smoke"
 set +e; ./gfctl use bogus >/dev/null 2>&1; u1_rc=$?
@@ -838,8 +860,8 @@ set +e; out=$(GFCTL_YES=1 frun uninstall </dev/null 2>&1); un_rc=$?; set -e
 ! grep -q '^podman rmi' "$FAUXLOG" && ok "uninstall без флагов: podman rmi ОТСУТСТВУЕТ" || bad "rmi был"
 [ ! -e "$TMP/stack/.env" ] && [ ! -e "$TMP/stack/cache" ] \
   && ok "uninstall: дерево стека снесено (кроме models)" || bad "стек не снесён"
-grep -q 'sudo rm -f /etc/security/limits.d/99-gfctl-memlock.conf' "$FAUXLOG" \
-  && ok "uninstall: слой limits.d (sudo rm)" || bad "limits.d слой"
+! grep -q 'limits.d/99-gfctl-memlock.conf' "$FAUXLOG" \
+  && ok "uninstall: limits.d НЕ тронут (4.1-F2: переживает uninstall ради будущих relogin)" || bad "limits.d тронут при uninstall"
 grep -q 'sudo loginctl disable-linger' "$FAUXLOG" && ok "uninstall: linger off" || bad "linger"
 [ ! -e "$ud/gfctl-serve.service" ] && ok "uninstall: юниты удалены" || bad "юниты"
 set +e; out=$(GFCTL_YES=1 frun uninstall --purge-models --purge-image </dev/null 2>&1); un2_rc=$?; set -e

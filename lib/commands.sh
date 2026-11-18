@@ -343,9 +343,13 @@ cmd_status() {
 # Назначение: cmd install — полная постановка сервера (идемпотентен; SPEC §3):
 #   preflight-гейты (ОС Linux → die; GPU-ноды → die; RAM-гейт профиля
 #   НЕДОСТАТУПЕН → die с цифрами; render-группа → WARN; gpu-lock (podman ps
-#   непуст) → WARN «переключение руками», D3: без takeover; memlock ≠
-#   unlimited и нет limits.d/*gfctl* → sudo tee 99-gfctl-memlock.conf + WARN
-#   «перелогинься» + exit 42 (ребут-код PLAN этапа 1); canon_port слушает
+#   непуст) → WARN «переключение руками», D3: без takeover; memlock-гейт по
+#   порогу 8388608 kB (4.1-F2, EXP-008: в средах без pam_limits unlimited
+#   недостижим, relogin ulimit не меняет): unlimited → PASS без WARN;
+#   ≥ порога → limits.d-файл (для будущих relogin) + WARN «достаточно»,
+#   install ПРОДОЛЖАЕТ; < порога или нечитаемый «?» → файл + WARN
+#   «перелогинься» + exit 42 (ребут-код PLAN этапа 1; «?» — консервативно,
+#   как раньше); canon_port слушает
 #   наше → идемпотентный путь, слушает чужое → die) → ветка 4.1:
 #   наш контейнер healthy (порт + running + load_completed в логе) → БЕЗ
 #   recreate («healthy — recreate не нужен»: до-проверка весов SKIP, юниты
@@ -358,7 +362,8 @@ cmd_status() {
 #   перерендер юнитов + автозапуск, контейнер не тронут.
 #
 # Побочные эффекты: веса (после ask), юнит-файлы, .env канона, каталог кэша,
-#   контейнер (podman rm+run), возможно limits.d-файл (sudo, exit 42),
+#   контейнер (podman rm+run), limits.d-файл (sudo; пишется всегда, кроме
+#   unlimited; exit 42 — только ml<8 GiB или «?»),
 #   autostart (systemctl/linger) — по флагу.
 #
 # Ограничения/допущения: требует gpu_nodes_present/ram_gate_line (profiles.sh,
@@ -400,11 +405,34 @@ cmd_install() {
     local names; names=$(podman ps --format '{{.Names}}' 2>/dev/null || true)
     [ -n "$names" ] && warn "GPU может быть занят контейнерами: $(echo "$names" | tr '\n' ' ')— gfctl не делает takeover (D3): переключение движков руками (hfctl off / gfctl off)"
   fi
+  # memlock-гейт по порогу ДОСТАТОЧНОСТИ (4.1-F2, EXP-008/FAEX), не по
+  # «unlimited»: в средах без pam_limits (ssh + podman-run) unlimited
+  # недостижим, а relogin ulimit не меняет — прежний гейт циклился
+  # (install: файл+exit 42 ↔ uninstall: файл снесён). Порог 8388608 kB
+  # (8 GiB) — нижняя граница: все живые окна (F20/F23 105 GiB, EXP-002..007
+  # FAEX 1318060032 kB) грузили движок при ulimit кратно выше. ml=unlimited
+  # → PASS без WARN; ml ≥ порога → файл (переза)писывается для будущих
+  # relogin + WARN «достаточно», install ПРОДОЛЖАЕТ; ml < порога → файл +
+  # WARN «перелогинься» + exit 42 (там relogin реально нужен); ml=«?»
+  # (нечитаемый) → прежний exit 42 — консервативно: не зная лимита,
+  # молча продолжать нельзя.
   local ml; ml=$(ulimit -l 2>/dev/null || echo "?")
-  if [ "$ml" != "unlimited" ] && ! compgen -G '/etc/security/limits.d/*gfctl*' >/dev/null 2>&1; then
+  ml_write() {  # один и тот же файл во всех ветках гейта — ради будущих relogin
     printf '# gfctl: memlock unlimited для ROCm/podman (SPEC §2)\n* soft memlock unlimited\n* hard memlock unlimited\n' \
       | sudo tee /etc/security/limits.d/99-gfctl-memlock.conf >/dev/null
-    warn "memlock ${ml} kB — записан /etc/security/limits.d/99-gfctl-memlock.conf; ПЕРЕЛОГИНЬСЯ (или ребутни) и повтори gfctl install"
+  }
+  if [ "$ml" = "unlimited" ]; then
+    :  # PASS без WARN
+  elif [ "$ml" = "?" ]; then
+    ml_write
+    warn "memlock не читается (ulimit -l) — записан /etc/security/limits.d/99-gfctl-memlock.conf; ПЕРЕЛОГИНЬСЯ (или ребутни) и повтори gfctl install"
+    exit 42
+  elif [ "$ml" -ge 8388608 ]; then
+    ml_write
+    warn "memlock ${ml} kB — достаточно (порог 8388608 kB); limits.d/99-gfctl-memlock.conf перезаписан для будущих relogin"
+  else
+    ml_write
+    warn "memlock ${ml} kB < порога 8388608 kB — записан /etc/security/limits.d/99-gfctl-memlock.conf; ПЕРЕЛОГИНЬСЯ (или ребутни) и повтори gfctl install"
     exit 42
   fi
   local healthy=0
@@ -998,7 +1026,9 @@ cmd_watch() {
 #   зачистка (SPEC §3; модели и образ по умолчанию ЖИВЫ): ask (не-TTY без
 #   GFCTL_YES → rc 1 — удаление данных только с согласия) → слои ПО ПОРЯДКУ:
 #   маркер+container_stop → disable+rm юнитов+daemon-reload → linger off
-#   (|| true на каждый systemd-шаг) → limits.d (sudo rm -f, || true) →
+#   (|| true на каждый systemd-шаг) → limits.d НЕ трогаем (4.1-F2: файл
+#   безвреден и переживает uninstall ради будущих relogin; снос возвращал
+#   memlock-цикл install) →
 #   дерево $STACK_DIR: всё КРОМЕ базы весов, если база внутри (find
 #   -mindepth/-maxdepth 1 ! -path); база вне — rm -rf стека целиком;
 #   приёмочные ~/gfctl-acc{,-src} (4.1 — всегда); --purge-models → rm -rf
@@ -1008,7 +1038,8 @@ cmd_watch() {
 #   печатается их список «остались нетронутыми». Итоговая сводка слоёв.
 #
 # Побочные эффекты: контейнер удалён; юниты сняты; linger off; limits.d-
-#   файл удалён (sudo); дерево стека удалено (кроме весов без флага);
+#   файл НЕ тронут (4.1-F2, переживает uninstall ради будущих relogin);
+#   дерево стека удалено (кроме весов без флага);
 #   ~/gfctl-acc{,-src} удалены; по флагам — веса (+acc-models) и образ.
 #
 # Ограничения/допущения: требует container_stop (serve.sh); ask — тот же
@@ -1046,8 +1077,7 @@ cmd_uninstall() {
   systemctl --user daemon-reload 2>/dev/null || true
   echo "слой 3/5: linger"
   sudo loginctl disable-linger "${USER:-$(id -un)}" 2>/dev/null || true
-  echo "слой 4/5: limits.d (memlock)"
-  sudo rm -f /etc/security/limits.d/99-gfctl-memlock.conf 2>/dev/null || true
+  echo "слой 4/5: limits.d — НЕ трогаем (безвреден; переживает uninstall ради будущих сессий)"
   echo "слой 5/5: дерево $STACK_DIR + приёмочные ~/gfctl-acc{,-src}"
   if [ -e "$MODELS_BASE" ] || [ "$MODELS_BASE" = "$STACK_DIR/models" ]; then
     # база весов внутри стека (дефолт): снести всё, КРОМЕ неё
