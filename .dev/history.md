@@ -37,3 +37,22 @@
   health 200 за ~70 с; **journal чист от statfs/cannot stat/FATAL** → DEFECT ПРИНЯТ ЖИВЬЁМ.
 - gfctl smoke 3/3 (роут mtp/2/262144) → gfctl off → hfctl on → hipfire healthy 45 с, linger on.
 - Пуш gfctl — сделан пользователем; приёмка шла из GitHub-клона = приёмка запушенного.
+
+## 2026-11-19 (ночь) — EVO-повтер EXP-008/009: ПРОЙДЕН, ЭТАП 4 ЗАКРЫТ (GO пользователя)
+- GitHub-клон 2cbb544 на evo → uninstall старой acc → bootstrap → хардлинки (сет 27b: IQ4_XS-pure
+  14G + DFlash2 1.1G из acc-models/27b — полный SKIP, 0 трафика весов) → install 27b-single:
+  загрузка 95 с → роут mtp/2/262144 → use-recreate (перезапуск) → SMOKE OK → **agent-check**:
+  сессия 19.9 s (реф 30.4 — лучше), follow-up 25k 2.9 (реф 3.0), docq 4.0 (реф 3.6) — 3 PASS;
+  рестарт-restore упёрся «container name gufo already in use» ×3 (контейнер от recreate жил,
+  рестарт-код не сделал rm в этом окружении) — Контингент: podman rm -f gufo вручную →
+  контейнер пересоздан (загрузка, health 200).
+- **Ребут evo → самоподъём solo**: юнит active (Environment вшит), gufo поднят юнитом,
+  health 200 — solo-цикл (запуск/перезапуск/ребут/возобновление) ПРОЙДЕН.
+- **27b-multi**: use 27b-multi → роут dflash2/sessions 2/ctx 196608 (канон EXP-006) → SMOKE OK
+  → перезапуск (use повторно) SMOKE OK → **ребут** → самоподъём multi (gufo Up 10 мин,
+  health ok) → возобновление OK.
+- Финал: gfctl off → hfctl on → hipfire healthy 30 с (27b-single mq4), linger on.
+- Монитор-артефакт: после ребута 10 мин «ssh-warming» в параллельном мониторе при живом
+  сервере (конкурентные ssh-сессии после ребута) — не состояние сервера, зафиксировано.
+- **ЭТАП 4 gfctl: ЗАКРЫТ** (доставка из GitHub-клона, ребут-приёмки обеих flavor, evo+FAEX;
+  defect юнит-Environment закрыт с живой приёмкой).
