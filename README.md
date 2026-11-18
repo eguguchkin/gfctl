@@ -5,30 +5,17 @@
 **qwen3.8-27B** и **qwen3.8-flash-next** — соло и мульти, под агентские
 сценарии. Сестринский продукт к hfctl (движок hipfire).
 
-> Статус: каркас этапа 1 (сабстэдж 1.1) — работают read-only/подготовительные
-> команды: `doctor`, `models`, `status`. Серверная часть (`install`, `use`,
-> `on/off`, `smoke`, автозапуск) — сабстэдж 1.2; `bench` — этап 2; `watch`,
-> `cache`, `agent-check` — этап 3.
+> Статус: этапы 1–3 закрыты, этап 4 (хардening/доставка) в работе — все
+> команды карты SPEC §3 живы: установка, профили + probe, bench, watch,
+> cache, agent-check, слоёный uninstall с purge-границами.
 
-## Quickstart
+## Quickstart — 4 команды от клонирования до работающего сервера (SPEC §1)
 
 ```bash
-# 1. перенести каталог репо на машину (rsync -a / scp -r / git по LAN)
-cd gfctl
-./install.sh          # дерево gfctl+lib+tpl → ~/gufo/, симлинк ~/.local/bin/gfctl
-gfctl doctor          # диагностика: ОС, /dev/kfd, render, memlock, linger,
-                      # RAM-гейты всех профилей, диск, порт, gpu-lock
-
-# 2. веса (после согласия; pre-flight «нужно X GiB», curl resume, sha256)
-gfctl models download 27b [--yes]     # set: 27b | flash | <профиль>
-
-# 3. pre-check GGUF-типов (unsloth UD-* для 27B не грузятся — IQ2_S/IQ3_XXS
-#    в FFN → КРАСНЫЙ «не загрузится»)
-gfctl models --check-types
-
-# 4. инвентарь и статус
-gfctl models          # скачано vs требуется по профилям, sha-статус, место
-gfctl status [--json] # профиль / health / роут / кэш / автозапуск
+git clone <путь-к-репо>/gfctl && cd gfctl   # локальная дистрибуция (D1): rsync -a / scp -r / git по LAN
+./install.sh                                # bootstrap: дерево gfctl+lib+tpl → ~/gufo/, симлинк ~/.local/bin/gfctl
+gfctl install                               # гейты → веса (после согласия) → юниты → старт → health → smoke → автозапуск
+gfctl status                                # проверка: профиль / health / роут / кэш / автозапуск
 ```
 
 ## Профили
@@ -43,12 +30,16 @@ gfctl status [--json] # профиль / health / роут / кэш / автоз
 `GFCTL_IMAGE`, `GFCTL_DIR`, `GFCTL_MODELS`, `GFCTL_PORT`, `GFCTL_BIND`,
 `GFCTL_YES`. Инсталляция живёт в `~/gufo/`.
 
-## Полная карта команд (итог этапа 1)
+## Полная карта команд
 
 `install` · `use` · `status [--json]` · `logs` · `watch` · `on`/`off` ·
-`uninstall` · `bench` · `smoke` · `agent-check` · `cache [--verify]` ·
-`doctor` · `models [--check-types | download <сет>]` · `--help`.
-Помеченные «этап 1.2/3» в `gfctl --help` пока отвечают rc=1 с указанием этапа.
+`uninstall [--purge-models] [--purge-image]` · `bench` · `smoke` ·
+`agent-check` · `cache [--verify]` · `doctor` ·
+`models [--check-types | download <сет>]` · `--help` — все команды живы
+(см. `gfctl --help`). Подготовительные шаги при желании — до
+`gfctl install`: `gfctl doctor` (диагностика), `gfctl models
+--check-types` (pre-check GGUF-типов), `gfctl models download <сет>
+[--yes]` (веса отдельно).
 
 ## Разработка
 

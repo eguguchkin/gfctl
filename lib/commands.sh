@@ -128,7 +128,10 @@ cmd_models() {
 # Назначение: cmd doctor — диагностика БЕЗ записи, rc 0 всегда: ОС, /dev/kfd,
 #   /dev/dri/renderD*, render-группа, memlock (+limits.d/*gfctl*), linger,
 #   RAM-гейты всех профилей цифрами, диск под веса (обои сета), порт, gpu-lock
-#   (WARN: кто держит GPU — соседство с hfctl-продом, D3: переключение руками).
+#   (WARN: кто держит GPU — соседство с hfctl-продом, D3: переключение руками),
+#   зеркало весов (GFCTL_MIRROR_BASE задан → строка; 4.1-F1), соседние
+#   артефакты (~/gufo-models ~/gufo-exp ~/halogen-* ~/gfctl-acc* —
+#   «обнаружен/не обнаружен»; 4.1).
 #
 # Побочные эффекты: только чтение системы + mkdir -p каталогов сетов
 #   (free_disk_gib); печать в stdout, WARN в stderr; ничего не меняет.
@@ -181,6 +184,10 @@ cmd_doctor() {
   for p in $PROFILE_LIST; do
     printf '  %s\n' "$(ram_gate_line "$p")"
   done
+  local mbase="${GFCTL_MIRROR_BASE:-}"
+  if [ -n "$mbase" ]; then
+    echo "зеркало весов (GFCTL_MIRROR_BASE): $mbase (первая попытка докачки; пусто/не задано — пин-URL HF)"
+  fi
   for set_name in 27b flash; do
     need_b=$(set_total_bytes "$set_name")
     need_gib=$(awk -v b="$need_b" 'BEGIN{printf "%.1f", b/1073741824}')
@@ -202,6 +209,17 @@ cmd_doctor() {
     fi
   else
     echo "gpu-lock: ? (podman недоступен — проверь на целевой машине)"
+  fi
+  # этап 4.1: «соседние» артефакты — что осталось от окон исследований
+  # (~/gufo-*, ~/halogen-*) и приёмок (~/gfctl-acc*); только чтение.
+  local home="${HOME:-}" art
+  if [ -n "$home" ]; then
+    echo "соседние артефакты (окна исследований и приёмки):"
+    for art in gufo-models gufo-exp halogen-models halogen-cache \
+               gfctl-acc gfctl-acc-src gfctl-acc-models; do
+      if [ -e "$home/$art" ]; then echo "  ~/$art: обнаружен"; else echo "  ~/$art: не обнаружен"; fi
+    done
+    echo "  примечание: uninstall НЕ трогает никогда: ~/gufo-models ~/gufo-exp ~/halogen-models ~/halogen-cache; приёмочные ~/gfctl-acc{,-src} удаляет, ~/gfctl-acc-models — только с --purge-models"
   fi
   return 0
 }
@@ -328,12 +346,16 @@ cmd_status() {
 #   непуст) → WARN «переключение руками», D3: без takeover; memlock ≠
 #   unlimited и нет limits.d/*gfctl* → sudo tee 99-gfctl-memlock.conf + WARN
 #   «перелогинься» + exit 42 (ребут-код PLAN этапа 1); canon_port слушает
-#   наше → идемпотентный путь, слушает чужое → die) → ensure_weights (ask,
-#   полные сеты — SKIP без вопросов) → install_units (рендер юнитов — всегда,
-#   даже с --no-autostart) → write_canon (sessions/context из таблицы) →
-#   container_up → wait_health 180 (роут печатает) → smoke → --no-autostart?
-#   «автозапуск выключен» : autostart_on. Повтор поверх работающего = SKIP
-#   весов + перерендер юнитов + recreate + health + smoke; дублей нет.
+#   наше → идемпотентный путь, слушает чужое → die) → ветка 4.1:
+#   наш контейнер healthy (порт + running + load_completed в логе) → БЕЗ
+#   recreate («healthy — recreate не нужен»: до-проверка весов SKIP, юниты
+#   перегенерируются, автозапуск — НОЛЬ podman run; мёртвый/загружающийся
+#   сервер → штатный путь ниже) → ensure_weights (ask, полные сеты — SKIP
+#   без вопросов) → install_units (рендер юнитов — всегда, даже с
+#   --no-autostart) → write_canon → container_up → wait_health 180 (роут
+#   печатает) → smoke → --no-autostart? «автозапуск выключен» :
+#   autostart_on. Повтор поверх работающего healthy = SKIP весов +
+#   перерендер юнитов + автозапуск, контейнер не тронут.
 #
 # Побочные эффекты: веса (после ask), юнит-файлы, .env канона, каталог кэша,
 #   контейнер (podman rm+run), возможно limits.d-файл (sudo, exit 42),
@@ -385,9 +407,20 @@ cmd_install() {
     warn "memlock ${ml} kB — записан /etc/security/limits.d/99-gfctl-memlock.conf; ПЕРЕЛОГИНЬСЯ (или ребутни) и повтори gfctl install"
     exit 42
   fi
+  local healthy=0
   if port_open "$(canon_port)"; then
     if [ "$(container_state)" = running ]; then
-      echo "порт $(canon_port) держит наш контейнер — идемпотентный recreate ниже"
+      # 4.1 идемпотентность: наш контейнер + роут загружен = healthy →
+      # recreate НЕ делаем (ноль podman run — сервер не трогаем);
+      # порт наш, но роута нет (загружается/упал) — штатный recreate ниже.
+      ROUTE_SPEC=""; ROUTE_SESSIONS=""; ROUTE_CTX=""; ROUTE_MODEL=""
+      parse_route < <(podman logs "$CONTAINER" 2>&1)
+      if [ -n "$ROUTE_SPEC" ]; then
+        healthy=1
+        echo "порт $(canon_port) держит наш контейнер, сервер healthy"
+      else
+        echo "порт $(canon_port) держит наш контейнер, но роут не загружен — штатный recreate ниже"
+      fi
     else
       die "порт $(canon_port) уже слушает ЧУЖОЕ — освободи порт или выбери другой: gfctl install --port N"
     fi
@@ -397,10 +430,14 @@ cmd_install() {
   ensure_weights "$set_name" || die "веса сета $set_name не докачаны/битые — см. WARN выше (повтор: gfctl models download $set_name)"
   install_units
   write_canon "$prof" "$(profile_field "$prof" 3)" "$(profile_field "$prof" 4)"
-  log "старт контейнера (recreate = rm+run)"
-  container_up "$prof"
-  wait_health 180
-  smoke
+  if [ "$healthy" = 1 ]; then
+    echo "healthy — recreate не нужен (веса SKIP, юниты перегенерированы, podman run: 0)"
+  else
+    log "старт контейнера (recreate = rm+run)"
+    container_up "$prof"
+    wait_health 180
+    smoke
+  fi
   if [ "$no_autostart" = 1 ]; then
     echo "автозапуск выключен (--no-autostart; включить: gfctl on)"
   else
@@ -964,24 +1001,28 @@ cmd_watch() {
 #   (|| true на каждый systemd-шаг) → limits.d (sudo rm -f, || true) →
 #   дерево $STACK_DIR: всё КРОМЕ базы весов, если база внутри (find
 #   -mindepth/-maxdepth 1 ! -path); база вне — rm -rf стека целиком;
-#   --purge-models → rm -rf базы весов; --purge-image → podman rmi || true.
-#   Итоговая сводка слоёв.
+#   приёмочные ~/gfctl-acc{,-src} (4.1 — всегда); --purge-models → rm -rf
+#   базы весов И ~/gfctl-acc-models; --purge-image → podman rmi || true.
+#   ГРАНИЦЫ (4.1): ~/gufo-models, ~/gufo-exp, ~/halogen-models,
+#   ~/halogen-cache — НИКОГДА (артефакты окон исследований); в конце
+#   печатается их список «остались нетронутыми». Итоговая сводка слоёв.
 #
 # Побочные эффекты: контейнер удалён; юниты сняты; linger off; limits.d-
 #   файл удалён (sudo); дерево стека удалено (кроме весов без флага);
-#   по флагам — веса и образ.
+#   ~/gfctl-acc{,-src} удалены; по флагам — веса (+acc-models) и образ.
 #
 # Ограничения/допущения: требует container_stop (serve.sh); ask — тот же
 #   механизм согласия, что у весов (die при отказе/не-TTY); каждый
 #   systemd/sudo-шаг заглушен — uninstall доходит до конца даже на машине
 #   без работающего systemd; find -mindepth 1 — НЕ удалить сам $STACK_DIR
-#   вместе с моделями при базe внутри.
+#   вместе с моделями при базe внутри; $HOME не задан → acc-слои пропускаются
+#   (rm -rf с пустым корнем недопустим).
 #
 # @param 1..N: string[]      # --purge-models | --purge-image
-# @stdout string             # ход слоёв + сводка
+# @stdout string             # ход слоёв + список нетронутых + сводка
 # @returns integer           # 0 — зачистка выполнена; 1 — согласие не дано
 cmd_uninstall() {
-  local purge_models=0 purge_image=0 a
+  local purge_models=0 purge_image=0 a home="${HOME:-}"
   for a in "$@"; do
     case "$a" in
       --purge-models) purge_models=1 ;;
@@ -990,9 +1031,9 @@ cmd_uninstall() {
     esac
   done
   local m="НЕ удаляются" i="НЕ"
-  [ "$purge_models" = 1 ] && m="удаляются"
+  [ "$purge_models" = 1 ] && m="удаляются (+ ~/gfctl-acc-models)"
   [ "$purge_image" = 1 ] && i=""
-  ask "Удалить gfctl и контейнер gufo (модели ${m}, образ ${i} удаляется)? [y/N] " \
+  ask "Удалить gfctl и контейнер gufo (модели ${m}, образ ${i} удаляется; приёмочные ~/gfctl-acc{,-src} тоже)? [y/N] " \
     || die "uninstall отменён (удаление — только после согласия; повтори с --yes)"
   echo "слой 1/5: контейнер"
   mkdir -p "$STACK_DIR"; touch "$STOP_MARKER"
@@ -1007,7 +1048,7 @@ cmd_uninstall() {
   sudo loginctl disable-linger "${USER:-$(id -un)}" 2>/dev/null || true
   echo "слой 4/5: limits.d (memlock)"
   sudo rm -f /etc/security/limits.d/99-gfctl-memlock.conf 2>/dev/null || true
-  echo "слой 5/5: дерево $STACK_DIR"
+  echo "слой 5/5: дерево $STACK_DIR + приёмочные ~/gfctl-acc{,-src}"
   if [ -e "$MODELS_BASE" ] || [ "$MODELS_BASE" = "$STACK_DIR/models" ]; then
     # база весов внутри стека (дефолт): снести всё, КРОМЕ неё
     find "$STACK_DIR" -mindepth 1 -maxdepth 1 ! -path "$MODELS_BASE" -exec rm -rf {} +
@@ -1015,8 +1056,16 @@ cmd_uninstall() {
     # база вне стека (--models-dir): стек целиком
     rm -rf "$STACK_DIR"
   fi
-  [ "$purge_models" = 1 ] && { echo "докачка: --purge-models → удаляю $MODELS_BASE"; rm -rf "$MODELS_BASE"; }
+  if [ -n "$home" ]; then
+    rm -rf "$home/gfctl-acc" "$home/gfctl-acc-src"
+  fi
+  if [ "$purge_models" = 1 ]; then
+    echo "докачка: --purge-models → удаляю $MODELS_BASE и ~/gfctl-acc-models"
+    rm -rf "$MODELS_BASE"
+    if [ -n "$home" ]; then rm -rf "$home/gfctl-acc-models"; fi
+  fi
   [ "$purge_image" = 1 ] && { echo "докачка: --purge-image → удаляю образ $IMAGE"; podman rmi "$IMAGE" >/dev/null 2>&1 || true; }
+  echo "остались нетронутыми (uninstall их не трогает никогда): ~/gufo-models ~/gufo-exp ~/halogen-models ~/halogen-cache"
   echo "uninstall готов. Модели: $([ "$purge_models" = 1 ] && echo удалены || echo "на месте ($MODELS_BASE)"). Образ: $([ "$purge_image" = 1 ] && echo удалён || echo "на месте ($IMAGE)")."
   echo "Вернуть: gfctl install (дерево gfctl — заново ./install.sh)"
 }

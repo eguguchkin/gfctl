@@ -115,6 +115,27 @@ cat > "$FAUX/curl" <<'EOF'
 #!/usr/bin/env bash
 { printf 'curl'; printf ' %s' "$@"; printf '\n'; } >> "${GFCTL_FAUX_LOG:?}"
 case "$*" in
+  *dlmirror://*|*dlpin://*)
+    # 4.1-F1: download-режим батареи — маркеры ТОЛЬКО в URL (последний
+    # аргумент; -o-путь намеренно не участвует, чтобы имя деста не
+    # коллидировало с URL зеркала). Тело → файл после -o, http-код → stdout
+    # (для -w '%{http_code}'): dlpin → годный файл, dlmirror …/MIRROR200 →
+    # годный файл, dlmirror …/MIRROR404 → rc 0 + код 404 + мусор в теле
+    # (эмуляция «curl rc=0, http≥400»).
+    dl_url="${@: -1}"
+    prev=""
+    for a in "$@"; do
+      if [ "$prev" = "-o" ]; then
+        case "$dl_url" in
+          *MIRROR404*) printf 'JUNK-404-HTML-NOT-A-WEIGHT' > "$a" ;;
+          *MIRROR200*) cat "${GFCTL_FAUX_MIRROR_SRC:?}" > "$a" ;;
+          *dlpin://*)  cat "${GFCTL_FAUX_PIN_SRC:?}" > "$a" ;;
+        esac
+      fi
+      prev="$a"
+    done
+    case "$dl_url" in *MIRROR404*) printf '404' ;; *) printf '200' ;; esac
+    exit 0 ;;
   *"/ready"*)
     [ "${GFCTL_FAUX_CURL_READYFAIL:-0}" = 1 ] && exit 7
     exit 0 ;;
@@ -1280,6 +1301,201 @@ set +e
 out=$(GFCTL_WATCH_TICKS=1 GFCTL_FAUX_PODMAN_LOGS="$LOGSP" frun watch 2>&1); fw_rc=$?; set -e
 [ "$fw_rc" = 0 ] && grep -q 'движок' <<<"$out" \
   && ok "gfctl watch через диспетчер: exec python → стрим → rc 0" || bad "gfctl watch (rc=$fw_rc)"
+
+# ══ 4.1: doctor-артефакты; install healthy→0 run / dead→run; uninstall границы ══
+
+echo "== 38. README quickstart: ровно 4 команды (SPEC §1), все упомянутые команды существуют"
+qs=$(awk '/^## Quickstart/{f=1;next} f && /^```bash/{c=1;next} f && /^```/{exit} c' README.md)
+qs_cmds=$(grep -vE '^[[:space:]]*(#|$)' <<<"$qs")
+qs_n=$(grep -c . <<<"$qs_cmds")
+[ "$qs_n" = 4 ] && ok "README quickstart: ровно 4 команды от клонирования (SPEC §1)" \
+  || bad "README quickstart: команд $qs_n (ждём 4)"
+qs_ok=1
+while IFS= read -r line; do
+  case "$line" in
+    gfctl\ *)
+      qcmd=${line#gfctl }; qcmd=${qcmd%% *}
+      grep -q "^  $qcmd)" gfctl || { bad "README: команды '$qcmd' нет в роутере gfctl"; qs_ok=0; } ;;
+    ./install.sh*)
+      [ -f install.sh ] || { bad "README: install.sh нет в репо"; qs_ok=0; } ;;
+    git\ clone*)
+      command -v git >/dev/null || { bad "README: git недоступен"; qs_ok=0; } ;;
+    *)
+      bad "README: нераспознанная строка quickstart: $line"; qs_ok=0 ;;
+  esac
+done <<<"$qs_cmds"
+[ "$qs_ok" = 1 ] && ok "README quickstart: все команды существуют (git / install.sh / роутер gfctl)"
+
+echo "== 39. doctor: блок «соседние артефакты» — детерминизм на пустом HOME + обнаружение"
+for a in gufo-models gufo-exp halogen-models halogen-cache gfctl-acc gfctl-acc-src gfctl-acc-models; do
+  rm -rf "$TMP/home/$a"
+done
+doct=$(gf 'cmd_doctor')
+[ "$(grep -c ': не обнаружен' <<<"$doct")" = 7 ] \
+  && ok "doctor на пустом HOME: все 7 «не обнаружен» (детерминизм)" \
+  || bad "doctor: «не обнаружен»=$(grep -c ': не обнаружен' <<<"$doct") (ждём 7)"
+[ "$(grep -c ': обнаружен' <<<"$doct")" = 0 ] && ok "doctor: ложных «обнаружен» нет" || bad "doctor: ложные обнаружения"
+grep -q 'uninstall НЕ трогает никогда' <<<"$doct" && grep -q '~/halogen-cache' <<<"$doct" \
+  && ok "doctor: приписка «uninstall НЕ трогает никогда» (gufo-models/halogen-*)" || bad "doctor: приписки нетронутых нет"
+grep -q -- '--purge-models' <<<"$doct" \
+  && ok "doctor: приписка ~/gfctl-acc-models — только с --purge-models" || bad "doctor: приписки purge нет"
+for a in gufo-models gufo-exp halogen-models halogen-cache gfctl-acc gfctl-acc-src gfctl-acc-models; do
+  mkdir -p "$TMP/home/$a"
+done
+doct2=$(gf 'cmd_doctor')
+[ "$(grep -c ': обнаружен' <<<"$doct2")" = 7 ] \
+  && ok "doctor с faux-артефактами: все 7 «обнаружен»" \
+  || bad "doctor: «обнаружен»=$(grep -c ': обнаружен' <<<"$doct2") (ждём 7)"
+
+echo "== 40. install идемпотентность: healthy → ровно 0 podman run; dead → штатный recreate"
+gf 'write_canon 27b-single 1 262144' >/dev/null 2>&1
+: > "$FAUXLOG"; rm -f "$FAUXCNT" "$FAUXCNT.curl"
+set +e
+out=$(GFCTL_FAUX_INSPECT=running GFCTL_FAUX_PODMAN_LOGS="$LOGOK" gf "$GATE_OK
+gpu_nodes_present(){ return 0; }
+ulimit(){ echo unlimited; }
+port_open(){ return 0; }
+cmd_install --profile 27b-single" 2>&1); ih_rc=$?; set -e
+[ "$ih_rc" = 0 ] && grep -q 'healthy — recreate не нужен' <<<"$out" \
+  && ok "install на healthy: rc 0 + «healthy — recreate не нужен»" \
+  || { bad "install healthy (rc=$ih_rc)"; tail -6 <<<"$out"; }
+[ "$(grep -c '^podman run' "$FAUXLOG")" = 0 ] \
+  && ok "install на healthy: podman run = 0 (DoD — сервер не тронут)" \
+  || bad "healthy: run=$(grep -c '^podman run' "$FAUXLOG")"
+[ "$(grep -c '^podman rm' "$FAUXLOG")" = 0 ] \
+  && ok "install на healthy: podman rm = 0 (контейнер даже не пересоздавался)" \
+  || bad "healthy: rm был"
+grep -q 'SKIP: qwen3.8-27b-IQ4_XS-pure.gguf' <<<"$out" \
+  && ok "install на healthy: до-проверка весов — SKIP без вопросов" || bad "healthy: веса не SKIP"
+[ -f "$ud/gfctl-serve.service" ] && [ -f "$ud/gfctl-watchdog.timer" ] \
+  && ok "install на healthy: юниты перегенерированы" || bad "healthy: юнитов нет"
+grep -q 'sudo loginctl enable-linger' "$FAUXLOG" \
+  && ok "install на healthy: автозапуск включён" || bad "healthy: linger не включён"
+: > "$FAUXLOG"; rm -f "$FAUXCNT" "$FAUXCNT.curl"
+set +e
+out=$(GFCTL_FAUX_PODMAN_LOGS="$LOGOK" gf "$GATE_OK
+gpu_nodes_present(){ return 0; }
+ulimit(){ echo unlimited; }
+port_open(){ return 1; }
+cmd_install --profile 27b-single" 2>&1); idd_rc=$?; set -e
+[ "$idd_rc" = 0 ] && grep -q 'SMOKE: OK' <<<"$out" && ! grep -q 'recreate не нужен' <<<"$out" \
+  && ok "install на dead: штатный путь (recreate + health + smoke), rc 0" \
+  || { bad "install dead (rc=$idd_rc)"; tail -6 <<<"$out"; }
+[ "$(grep -c '^podman run' "$FAUXLOG")" = 1 ] \
+  && ok "install на dead: ровно один recreate (run=1)" \
+  || bad "dead: run=$(grep -c '^podman run' "$FAUXLOG")"
+
+echo "== 41. uninstall границы: ~/gfctl-acc{,-src} удаляются; acc-models — только --purge-models; gufo/halogen НИКОГДА"
+printf 'x' > "$TMP/home/gfctl-acc/gfctl"; printf 'x' > "$TMP/home/gfctl-acc-src/install.sh"
+printf 'x' > "$TMP/home/gfctl-acc-models/w.gguf"; printf 'x' > "$TMP/home/gufo-models/keep.gguf"
+gf 'install_units' >/dev/null 2>&1   # юниты для слоя 2
+: > "$FAUXLOG"
+set +e; out=$(GFCTL_YES=1 frun uninstall </dev/null 2>&1); ub_rc=$?; set -e
+[ "$ub_rc" = 0 ] && ok "uninstall с faux-артефактами → rc 0" || bad "uninstall границы rc=$ub_rc"
+[ ! -e "$TMP/home/gfctl-acc" ] && [ ! -e "$TMP/home/gfctl-acc-src" ] \
+  && ok "uninstall без флагов: ~/gfctl-acc{,-src} удалены (приёмочные)" || bad "acc-каталоги не удалены"
+[ -e "$TMP/home/gfctl-acc-models" ] \
+  && ok "uninstall без флагов: ~/gfctl-acc-models НЕ удалён (только --purge-models)" || bad "acc-models удалён БЕЗ флага!"
+[ -e "$TMP/home/gufo-models/keep.gguf" ] && [ -e "$TMP/home/gufo-exp" ] \
+  && [ -e "$TMP/home/halogen-models" ] && [ -e "$TMP/home/halogen-cache" ] \
+  && ok "uninstall: ~/gufo-models ~/gufo-exp ~/halogen-* НЕ тронуты (DoD)" || bad "чужие артефакты пострадали!"
+grep -q 'остались нетронутыми' <<<"$out" && grep -q '~/gufo-models' <<<"$out" && grep -q '~/halogen-cache' <<<"$out" \
+  && ok "uninstall: список «остались нетронутыми» напечатан в конце" || bad "списка нетронутых нет в выводе"
+! grep -q '^podman rmi' "$FAUXLOG" \
+  && ok "uninstall без --purge-image: podman rmi ОТСУТСТВУЕТ" || bad "rmi без флага"
+set +e; out=$(GFCTL_YES=1 frun uninstall --purge-models </dev/null 2>&1); um_rc=$?; set -e
+[ "$um_rc" = 0 ] && [ ! -e "$TMP/home/gfctl-acc-models" ] \
+  && ok "uninstall --purge-models: ~/gfctl-acc-models удалён" || bad "purge-models: acc-models остался (rc=$um_rc)"
+[ -e "$TMP/home/gufo-models/keep.gguf" ] \
+  && ok "--purge-models: ~/gufo-models по-прежнему нетронут" || bad "purge-models задел gufo-models!"
+
+# ══ 4.1-F1: зеркало весов (GFCTL_MIRROR_BASE): mirror-first / фоллбэк / doctor ══
+
+echo "== 42. GFCTL_MIRROR_BASE: mirror-first (file:// и faux 200), фоллбэк (rc≠0 и faux http404), mirror-off"
+dlm() { ( MODELS_BASE="$TMP/dl" GFCTL_MIRROR_BASE="${GMB:-}"
+          log()  { echo "LOG: $*"; }; warn() { echo "WARN: $*" >&2; }; die() { echo "DIE: $*" >&2; exit 1; }
+          source lib/models.sh; download_file "$@" ); }
+dlm_faux() { ( PATH="$FAUX:$PATH" MODELS_BASE="$TMP/dl" GFCTL_MIRROR_BASE="${GMB:-}"
+          export GFCTL_FAUX_LOG="$FAUXLOG" GFCTL_FAUX_CNT="$FAUXCNT" \
+                  GFCTL_FAUX_MIRROR_SRC GFCTL_FAUX_PIN_SRC
+          log()  { echo "LOG: $*"; }; warn() { echo "WARN: $*" >&2; }; die() { echo "DIE: $*" >&2; exit 1; }
+          source lib/models.sh; download_file "$@" ); }
+mkdir -p "$TMP/mirror"
+
+# 1) mirror-first, реальный curl + file:// (http-код «000» → годный; NAS/LAN-схема)
+cp "$TMP/srv/blob1" "$TMP/mirror/mir_ok.gguf"
+set +e; GMB="file://$TMP/mirror" out=$(dlm "file://$TMP/srv/blob2" "$TMP/dl/flash/mir_ok.gguf" 200000 "$sha1" 2>&1); m1_rc=$?; set -e
+[ "$m1_rc" = 0 ] && grep -q 'PASS: mir_ok.gguf (sha OK)' <<<"$out" \
+  && ok "mirror-first (file://, код 000): rc 0 + PASS sha" || { bad "mirror-first file:// (rc=$m1_rc)"; tail -5 <<<"$out"; }
+cmp -s "$TMP/dl/flash/mir_ok.gguf" "$TMP/srv/blob1" \
+  && ok "mirror-first: файл скачан ИЗ ЗЕРКАЛА (контент blob1, не пин)" || bad "mirror-first: контент не из зеркала"
+grep -q "← file://$TMP/mirror/mir_ok.gguf" <<<"$out" \
+  && ok "mirror-first: в логе зеркало-URL" || bad "mirror-first: нет зеркало-URL в логе"
+! grep -q "file://$TMP/srv/blob2" <<<"$out" \
+  && ok "mirror-first: пин-URL НЕ дёргался (лог чист от HF)" || bad "mirror-first: был запрос пин-URL"
+grep -q 'нужно 0.0 GiB (остаток)' <<<"$out" \
+  && ok "mirror-first: pre-flight на месте (как раньше)" || bad "mirror-first: pre-flight пропал"
+! grep -q 'фоллбэк' <<<"$out" && ok "mirror-first: без фоллбэка (зеркало годное)" || bad "mirror-first: ложный фоллбэк"
+
+# 2) зеркало отсутствует → curl rc≠0 → фоллбэк на пин-URL (реальный curl)
+rm -f "$TMP/mirror/mir_fail.gguf"
+set +e; GMB="file://$TMP/mirror" out=$(dlm "file://$TMP/srv/blob1" "$TMP/dl/flash/mir_fail.gguf" 200000 "$sha1" 2>&1); m2_rc=$?; set -e
+[ "$m2_rc" = 0 ] && grep -q 'PASS: mir_fail.gguf (sha OK)' <<<"$out" \
+  && ok "зеркало-нет (curl rc≠0): фоллбэк докачал с пина, rc 0" || { bad "зеркало-нет (rc=$m2_rc)"; tail -5 <<<"$out"; }
+grep -q "← file://$TMP/mirror/mir_fail.gguf" <<<"$out" \
+  && grep -q "← file://$TMP/srv/blob1" <<<"$out" \
+  && ok "зеркало-нет: в логе ОБЕ попытки (зеркало → пин-URL)" || bad "зеркало-нет: неполный лог попыток"
+grep -q 'WARN: зеркало не ответило годным файлом.*фоллбэк на пин-URL' <<<"$out" \
+  && ok "зеркало-нет: WARN фоллбэка напечатан" || bad "зеркало-нет: WARN пропал"
+[ ! -e "$TMP/dl/flash/mir_fail.gguf.part" ] \
+  && ok "зеркало-нет: .part-хвоста не осталось (restore до попытки)" || bad "зеркало-нет: мусорный .part"
+
+# 3) faux curl: mirror-URL → 200 (rc 0, код 2xx) — фоллбэка НЕТ
+: > "$FAUXLOG"
+set +e
+GFCTL_FAUX_MIRROR_SRC="$TMP/srv/blob1" GFCTL_FAUX_PIN_SRC="$TMP/srv/blob2" \
+GMB="dlmirror://nas.lan/MIRROR200" \
+  out=$(dlm_faux "dlpin://hf.test/PINOK/m200.gguf" "$TMP/dl/flash/MIRROR200.gguf" 200000 "$sha1" 2>&1); m3_rc=$?; set -e
+[ "$m3_rc" = 0 ] && grep -q 'PASS: MIRROR200.gguf (sha OK)' <<<"$out" \
+  && ok "faux mirror 200: rc 0 + PASS sha" || { bad "faux mirror 200 (rc=$m3_rc)"; tail -5 <<<"$out"; }
+grep -q 'dlmirror://nas.lan/MIRROR200/MIRROR200.gguf' "$FAUXLOG" \
+  && ok "faux mirror 200: лог содержит mirror-URL" || bad "faux mirror 200: mirror-URL не в логе"
+! grep -q 'dlpin://' "$FAUXLOG" \
+  && ok "faux mirror 200: HF-URL (dlpin) в логе ОТСУТСТВУЕТ (DoD)" || bad "faux mirror 200: был запрос HF"
+cmp -s "$TMP/dl/flash/MIRROR200.gguf" "$TMP/srv/blob1" \
+  && ok "faux mirror 200: файл скачан (контент зеркала)" || bad "faux mirror 200: контент не тот"
+
+# 4) faux curl: mirror → rc 0, но http 404 (≥400) → фоллбэк на пин-URL
+: > "$FAUXLOG"
+set +e
+GFCTL_FAUX_MIRROR_SRC="$TMP/srv/blob2" GFCTL_FAUX_PIN_SRC="$TMP/srv/blob1" \
+GMB="dlmirror://nas.lan/MIRROR404" \
+  out=$(dlm_faux "dlpin://hf.test/PINOK/m404.gguf" "$TMP/dl/flash/MIRROR404.gguf" 200000 "$sha1" 2>&1); m4_rc=$?; set -e
+[ "$m4_rc" = 0 ] && grep -q 'PASS: MIRROR404.gguf (sha OK)' <<<"$out" \
+  && grep -q 'фоллбэк на пин-URL' <<<"$out" \
+  && ok "faux mirror 404 (rc 0, код ≥400): фоллбэк, rc 0 + WARN" || { bad "faux mirror 404 (rc=$m4_rc)"; tail -5 <<<"$out"; }
+grep -q 'dlmirror://nas.lan/MIRROR404/MIRROR404.gguf' "$FAUXLOG" \
+  && grep -q 'dlpin://hf.test/PINOK/m404.gguf' "$FAUXLOG" \
+  && ok "faux mirror 404: лог содержит обе попытки (зеркало → пин)" || bad "faux mirror 404: неполный лог"
+cmp -s "$TMP/dl/flash/MIRROR404.gguf" "$TMP/srv/blob1" \
+  && ok "faux mirror 404: контент = пин (404-хвост зеркала не пережил)" || bad "faux mirror 404: мусор зеркала в файле"
+[ ! -e "$TMP/dl/flash/MIRROR404.gguf.part" ] \
+  && ok "faux mirror 404: .part чист (restore сработал)" || bad "faux mirror 404: .part остался"
+
+# 5) mirror-off (пустая строка) → ровно как раньше: одна попытка пина, без «зеркало»
+set +e; GMB="" out=$(dlm "file://$TMP/srv/blob1" "$TMP/dl/flash/mir_off.gguf" 200000 "$sha1" 2>&1); m5_rc=$?; set -e
+[ "$m5_rc" = 0 ] && grep -q 'PASS: mir_off.gguf (sha OK)' <<<"$out" \
+  && ! grep -q 'зеркало' <<<"$out" \
+  && ok "mirror-off (пусто): поведение прежнее (пин-URL, ни слова про зеркало)" \
+  || { bad "mirror-off (rc=$m5_rc)"; tail -5 <<<"$out"; }
+
+# 6) doctor: строка зеркала только при заданном GFCTL_MIRROR_BASE
+doctm=$(GFCTL_MIRROR_BASE="https://nas.lan/gguf" gf 'cmd_doctor')
+grep -q 'зеркало весов (GFCTL_MIRROR_BASE): https://nas.lan/gguf' <<<"$doctm" \
+  && ok "doctor: зеркало напечатано, если задано" || bad "doctor: строки зеркала нет"
+doct0=$(gf 'cmd_doctor')
+! grep -q 'зеркало весов' <<<"$doct0" \
+  && ok "doctor: без GFCTL_MIRROR_BASE строки зеркала нет" || bad "doctor: лишняя строка зеркала"
 
 printf 'ИТОГО: PASS=%s FAIL=%s\n' "$PASS" "$FAIL"
 [ "$FAIL" = 0 ]

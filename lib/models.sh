@@ -1,7 +1,8 @@
 # shellcheck shell=bash
 # ── веса: таблица сетов + download + check-types ────────────────────────────
-# Модуль читает MODELS_BASE и TPL_DIR и пишет через log()/warn() — всё
-# объявлено в диспетчере gfctl до source этого файла. Сеты — по profile_field
+# Модуль читает MODELS_BASE, TPL_DIR и GFCTL_MIRROR_BASE (зеркало-first при
+# докачке, пусто = пин-URL HF) и пишет через log()/warn() — всё объявлено в
+# диспетчере gfctl до source этого файла. Сеты — по profile_field
 # (lib/profiles.sh, поле 1).
 #
 # Формат записи сета: filename|size_bytes|sha256|url|role, role ∈ main|draft|mtp.
@@ -83,6 +84,17 @@ free_disk_gib() {
 # Назначение: единица работы download — скачать один файл с pre-flight
 #   «нужно X GiB (остаток), свободно Y Gi» ДО трафика, докачкой curl
 #   (-C - resume существующего .part) и sha256-верификацией после.
+#   ЗЕРКАЛО-FIRST (4.1-F1): если GFCTL_MIRROR_BASE непуст — ПЕРВАЯ попытка
+#   качает "$GFCTL_MIRROR_BASE/<basename dest>" (страховка от смерти/рейт-
+#   лимитов HF: зеркалом может быть NAS/LAN-сервер, на котором разложены те
+#   же имена файлов, что в пинах таблицы). Отказ зеркала = curl rc≠0 ИЛИ
+#   итоговый http-код ≥400 (rc 0 c ошибочным кодом тоже фоллбэк) → WARN и
+#   пин-URL в той же попытке; попытки 2–3 — сразу пин-URL. Зеркальная
+#   попытка без --retry (fail-fast: живой фоллбэк сам ретраит 4×); битый/
+#   частичный хвост зеркала НЕ должен ломать resume пин-URL → .part
+#   восстанавливается до размера до попытки (truncate/rm). Финальный
+#   арбитр в любом случае sha256 — зеркальный файл, прошедший http-гейт,
+#   но битый по содержимому, словит SHA-MISMATCH и будет удалён.
 #
 # Побочные эффекты: файлы dest.part/dest в каталоге сета; сеть (curl);
 #   mkdir -p каталога сета (через free_disk_gib). Размер совпал → SKIP без
@@ -95,18 +107,22 @@ free_disk_gib() {
 #   вернул бы размер ссылки ~91 B и ложную докачку, EXP-005-faex: веса живут
 #   симлинками); несовместимый .part от прошлой сессии проявит себя как
 #   SHA-MISMATCH → удаление (само-восстановление); pre-flight сравнивает GiB
-#   с одним знаком через awk; curl без прогресс-метра (-sSL, флаги task.md).
+#   с одним знаком через awk; curl без прогресс-метра (-sSL, флаги task.md);
+#   http-код «000» (file:// — батарея/LAN-схема без http) трактуется как
+#   годный ответ — содержимое всё равно судит sha256.
 #
 # @param 1: string   # url (https://… из таблицы или file:// для тестов)
 # @param 2: string   # dest — полный путь итогового файла
 # @param 3: integer  # size — пин размера в байтах
 # @param 4: /^[0-9a-f]{64}$/ # sha — пин sha256
-# @stdout string     # «нужно/свободно», «SKIP:», «PASS:», ход попыток (log)
-# @stderr string     # WARN при нехватке места / SHA-MISMATCH / сетевом отказе
+# @stdout string     # «нужно/свободно», «SKIP:», «PASS:», ход попыток с URL (log)
+# @stderr string     # WARN при нехватке места / SHA-MISMATCH / сетевом отказе /
+#                    # отказе зеркала (фоллбэк)
 # @returns integer   # 0 — файл на месте и sha OK; 1 — отказ (место/сеть/sha)
 download_file() {
   local url="$1" dest="$2" size="$3" sha="$4"
   local part="$dest.part" attempt remaining psz need_gib have_gib ok got
+  local mirror="${GFCTL_MIRROR_BASE:-}" try_url mrc http_code pre_size
   if [ -f "$dest" ] && [ "$(stat -L -c %s "$dest")" = "$size" ]; then
     echo "SKIP: $(basename "$dest") (размер совпал — честный sha-статус даёт: gfctl models)"
     return 0
@@ -125,7 +141,22 @@ download_file() {
   fi
   ok=""
   for attempt in 1 2 3; do
-    log "качаю (попытка $attempt/3): $(basename "$dest")"
+    if [ -n "$mirror" ] && [ "$attempt" = 1 ]; then
+      try_url="$mirror/$(basename "$dest")"
+      log "качаю (попытка 1/3, зеркало): $(basename "$dest") ← $try_url"
+      pre_size=$(stat -c %s "$part" 2>/dev/null || echo 0)
+      mrc=0; http_code=$(curl -sSL -C - --connect-timeout 10 -o "$part" -w '%{http_code}' "$try_url") || mrc=$?
+      if [ "$mrc" = 0 ]; then
+        case "$http_code" in
+          2*|000) log "зеркало ответило годным файлом (http ${http_code:-?})"; ok=1; break ;;
+          *)      mrc=1 ;;   # rc 0, но http ≥400 (или пустой) — фоллбэк
+        esac
+      fi
+      # битый/частичный хвост зеркала не должен ломать resume пин-URL
+      if [ "$pre_size" -gt 0 ]; then truncate -s "$pre_size" "$part" 2>/dev/null || true; else rm -f "$part"; fi
+      warn "зеркало не ответило годным файлом (rc=$mrc, http=${http_code:-?}) — фоллбэк на пин-URL"
+    fi
+    log "качаю (попытка $attempt/3): $(basename "$dest") ← $url"
     if curl -sSL -C - --retry 4 --retry-delay 5 --connect-timeout 20 -o "$part" "$url"; then ok=1; break; fi
     [ "$attempt" -lt 3 ] && sleep 15
   done

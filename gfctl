@@ -31,7 +31,8 @@
 #                           — докачка весов: pre-flight «нужно X GiB», curl
 #                             resume, sha256-verify после
 # Конфигурация (env переопределяет): GFCTL_IMAGE, GFCTL_DIR, GFCTL_MODELS,
-# GFCTL_PORT, GFCTL_BIND, GFCTL_YES.
+# GFCTL_PORT, GFCTL_BIND, GFCTL_YES, GFCTL_MIRROR_BASE (зеркало весов:
+# первая попытка докачки = <база>/<имя файла пина>; пусто = пин-URL HF).
 # === USAGE-END ===
 set -euo pipefail
 
