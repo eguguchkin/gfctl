@@ -15,3 +15,8 @@
   скрипта (hfctl в ~/hipfire/hfctl, PATH не включает ~/.local/bin); прод вернут вручную.
 - Возврат: gfctl off → hfctl on → HEALTHY 30 с, status ok, linger on. exp-009 fix-r1
   (STACK_DIR gfctl-acc + GFCTL_MODELS в EXP-скрипте) — df8a941.
+- EXP-009 хронология монитора (10-с срезы): activating 75×10 с (~12.5 мин) — это НЕ GPU-ожидание,
+  а цикл падения дефектного юнита (Environment) до контингент-правки; после правки юнит active
+  сразу, gufo healthy (http 200) через ~85 с после старта контейнера; финал — возврат hipfire-прода
+  (health_http=000 в срезах — монитор смотрит порт 8080 gufo, корректно). Вывод: без defect-фикса
+  (render Environment в юнит-tpl) каждый ребут acc-инсталляции = вечный activating.
