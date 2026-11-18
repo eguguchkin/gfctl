@@ -26,3 +26,14 @@
   чист от statfs/FATAL/cannot stat (0 вхождений). Финал: gfctl off → hfctl on → HEALTHY 30 с,
   linger on. **DEFECT ЗАКРЫТ.** Попутно: EXP-008/009-инцидент pull-висяка повторно подтвердил
   лечение kill+retry (второй podman run: «incomplete layer deleting» → докачка 2.8 GB → ок).
+
+## 2026-11-19 (ночь) — ФИНАЛЬНАЯ приёмка gfctl из GitHub-клона на FAEX (GO пользователя)
+- Полный чистый цикл: uninstall acc → **git clone https://github.com/eguguchkin/gfctl** (2cbb544,
+  свежайший) → install.sh → install flash-multi (веса SKIP по хардлинкам, 0 трафика) → healthy
+  → **use recreate** (rm+run, «no container» benign ×2 — штатно) → SMOKE OK → **agent-check**.
+- Рестарт-restore в agent-check (запланированный) поднял контейнер за 95 с, restore reuse=disk.
+- **РЕБУТ**: машина up 25 с; gfctl-serve **active на первом срезе** (юнит с вшитым
+  Environment=GFCTL_DIR/GFCTL_MODELS, r bc991f1) — gufo поднят юнитом, рук. команд 0;
+  health 200 за ~70 с; **journal чист от statfs/cannot stat/FATAL** → DEFECT ПРИНЯТ ЖИВЬЁМ.
+- gfctl smoke 3/3 (роут mtp/2/262144) → gfctl off → hfctl on → hipfire healthy 45 с, linger on.
+- Пуш gfctl — сделан пользователем; приёмка шла из GitHub-клона = приёмка запушенного.
