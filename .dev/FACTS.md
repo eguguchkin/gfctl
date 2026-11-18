@@ -94,6 +94,27 @@ gfctl off → hfctl on HEALTHY 15 с → smoke OK.
 - ⚠️ rsync в ocbox отсутствует: EXP-транспорт = tar|ssh (правка 2026-11-17,
   все три EXP).
 
+## F24 · Миграция стека на нового юзера: данные rsync, стек из tpl/git; sed целей маунтов = разрыв HIPFIRE_HOME (2026-11-18)
+- Вшито в образ `ghcr.io/warpfront/hipfire:0.4.7` (image inspect; размер 3.69 GB — моделей внутри нет):
+  `ENV HOME=/home/hipfire`, `HIPFIRE_HOME=/home/hipfire/.hipfire`. Entrypoint (`/usr/local/bin/hipfire-entrypoint`)
+  путь не переопределяет; `config.toml` state-конфига путей моделей не содержит. Движок ВСЕГДА ищет/пишет
+  модели в `$HIPFIRE_HOME/models` = `/home/hipfire/.hipfire/models` — контейнерный путь, от хостового юзера не зависит.
+- `tpl/compose/compose.yml:24,27` — ЦЕЛИ маунтов захардкожены `/home/hipfire/.hipfire[/models]`. При миграции
+  хостового юзера менять можно только ИСТОЧНИКИ (`.env`: HIPFIRE_MODELS_PATH/HIPFIRE_STATE_DIR — генерит write_env).
+- Сед целей в runtime `compose.yml` разрывает связку «маунт ↔ вшитый HIPFIRE_HOME» → движок не видит маунтов →
+  полный pull В КОНТЕЙНЕРНЫЙ СЛОЙ (недокачка исчезает вместе с контейнером при rm).
+- Подтверждение живьём: продах FAEX (цели `/home/hipfire/.hipfire`) — работает; evo-ai (после sed — цели
+  `/home/ai/.hipfire`) — сервер держит 27b-сет ~17.4 GB В ДИФФ-СЛОЕ контейнера (merged rootfs:
+  `/home/hipfire/.hipfire/models/qwen3.8-27b.mq4-xts` = 14 987 185 152 B + dflash/vision/mtp, mtime 16:25):
+  переживает ребут/рестарт (rootless storage персистентен), НЕ переживёт `podman rm`/`force-recreate`
+  (перекачка 15 GB в новый слой, снова мимо маунта). Маунт models/27b при этом — мёртвый груз.
+- Канон миграции (как в llm-lab `scripts/deploy_hipfire.sh`): (1) данные (модели/образы/тома) — rsync/tar|ssh;
+  (2) стек-код — чистая установка из git/tar репо: install → write_stack_files/write_env (рендер из tpl,
+  sync_tree) — sed рендер-артефактов запрещён; (3) up → health → smoke. Ретрай ai-FAEX — по этому канону.
+- Нераскрытым остаётся механизм «Already downloaded» init на evo 16:23:09 при разорванных маунтах
+  (вероятно, trust state-кэша verified-artifacts.json без стат'а файла) — не считать «Already downloaded»
+  признаком видимости маунта.
+
 ## F23 · EXP-006 финал: 27b-multi probe = 196608, bench паритет (2026-11-18)
 Probe-механика 2.1 живьём: сброс канона → лестница → «ступень 196608:
 OK — канон» → роут `dflash2, sessions 2, ctx 196608` → SMOKE 3/3 →

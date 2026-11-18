@@ -55,7 +55,7 @@ gfctl install             # preflight → веса → юниты → старт
 
 | Команда | Действие |
 |---|---|
-| `gfctl install [--profile P] [--port N] [--bind A] [--models-dir D] [--no-autostart]` | Preflight → скачивание весов профиля (размер + sha256 до и после) → **probe-подбор контекста** (для мульти-профилей) → генерация юнитов → старт → health → smoke → **автозапуск** (если не `--no-autostart`). Идемпотентен |
+| `gfctl install [--profile P] [--port N] [--bind A] [--models-dir D] [--no-autostart]` | Preflight → скачивание весов профиля (размер + sha256 до и после) → **probe-подбор контекста** (для мульти-профилей) → генерация юнитов → старт → health → smoke → **автозапуск** (если не `--no-autostart`). Идемпотентен. Preflight memlock-гейт — по порогу достаточности 8388608 kB (4.1-F2, не по «unlimited»): ml ≥ порога → limits.d-файл перезаписан + WARN, install продолжается; ml < порога или нечитаемый → файл + WARN «перелогинься» + exit 42 |
 | `gfctl use 27b-single\|27b-multi\|flash-multi [--sessions N] [--context N] [--no-probe]` | Проверка гейтов → ленивый добор весов → **probe-подбор** (если не `--no-probe`) → перегенерация юнита → recreate → health → smoke. Канон профиля заменяется |
 | `gfctl status [--json]` | Профиль, health, **фактический роут** (speculative=mtp/dflash2, sessions, context — из лога `load_completed`), состояние кэша (ram/disk), автозапуск, версия образа |
 | `gfctl logs [-f] [N]` | Логи контейнера |
@@ -67,7 +67,7 @@ gfctl install             # preflight → веса → юниты → старт
 | `gfctl cache [--verify]` | Сводка кэша из логов (configured/skipped/evicted) + `/metrics` cached_total; `--verify` — контрольный follow-up + рестарт-проба |
 | `gfctl doctor` | Диагностика без записи: ОС, /dev/kfd, render-группа, memlock, linger, RAM-гейты всех профилей (цифрами), диск под веса, порт, **gpu-lock** (кто держит /dev/kfd — предупреждение о hfctl-проде) |
 | `gfctl models [--check-types]` | Скачано vs требуется по профилям, sha-статус, свободное место; `--check-types` — pre-check GGUF-типов (IQ2_S/IQ3_XXS/неизвестные в FFN → КРАСНЫЙ «не загрузится») |
-| `gfctl uninstall [--purge-models] [--purge-image]` | Слоёная зачистка: контейнер, юниты, limits.d, `~/gufo` (модели щадятся по умолчанию) |
+| `gfctl uninstall [--purge-models] [--purge-image]` | Слоёная зачистка: контейнер, юниты, `~/gufo` (модели щадятся по умолчанию); `limits.d/99-gfctl-memlock.conf` НЕ трогается (4.1-F2: безвреден, переживает uninstall ради будущих relogin) |
 
 ## 4 · Модель состояний
 

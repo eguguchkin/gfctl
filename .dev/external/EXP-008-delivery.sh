@@ -60,6 +60,10 @@ SSH="ssh -i $GF_ACC_KEY -o BatchMode=yes -o ConnectTimeout=10"
 
 exec > >(tee "$RES") 2>&1
 
+echo "== EXP-008: снос СТАРОЙ инсталляции (uninstall снесёт acc/acc-src — поэтому ДО tar)"
+$SSH "$GF_ACC_USER@$GF_ACC_HOST" 'if [ -x "$HOME/gfctl-acc/gfctl" ]; then GFCTL_YES=1 "$HOME/gfctl-acc/gfctl" uninstall; else echo "(не было — чистая машина)"; fi' || {
+  echo "RESULT: ERROR — uninstall старой инсталляции не прошёл"; exit 1; }
+
 echo "== EXP-008: tar-перенос дерева (без .git/.dev)"
 $SSH "$GF_ACC_USER@$GF_ACC_HOST" 'rm -rf ~/gfctl-acc-src && mkdir -p ~/gfctl-acc-src' || {
   echo "RESULT: ERROR — ssh не прошёл"; exit 1; }
@@ -72,12 +76,8 @@ $SSH "$GF_ACC_USER@$GF_ACC_HOST" "GF_ACC_FLAVOR=$GF_ACC_FLAVOR bash -s" <<'REMOT
   export GFCTL_DIR="$HOME/gfctl-acc" GFCTL_MODELS="$HOME/gfctl-acc-models" GFCTL_YES=1
   GF="$HOME/gfctl-acc/gfctl"
 
-  echo "== bootstrap-first (F21): install.sh"
+  echo "== bootstrap-first (F21): install.sh (свежее дерево из src)"
   bash "$HOME/gfctl-acc-src/install.sh" || exit 44
-
-  echo "== предусловие: старая приёмочная инсталляция снята (без purge)"
-  if [ -x "$GF" ]; then "$GF" uninstall --yes || exit 45; else echo "(не было — чистая машина)"; fi
-  export GFCTL_DIR="$HOME/gfctl-acc" GFCTL_MODELS="$HOME/gfctl-acc-models" GFCTL_YES=1
 
   echo "== веса: хардлинки из ~/gufo-models, если источник есть (иначе скачает install)"
   setname=${GF_ACC_FLAVOR%%-*}

@@ -210,3 +210,56 @@
   одна строка, при следующем касании README.
 - doctor: печатать размер архива образа, если `~/gfctl-image-backup.tar`
   существует (симметрия к блоку артефактов).
+
+## Round 2 (2026-11-18): 4.1-F2 — memlock-порог (EXP-008)
+
+### What was done
+- **Гейт install по порогу достаточности** (`lib/commands.sh`, cmd_install):
+  вместо «unlimited И нет limits.d-файла» — числовой порог 8388608 kB
+  (8 GiB). Живой факт EXP-008/FAEX: pam_limits к ssh-сессиям не применяется
+  (relogin НИКОГДА не меняет ulimit; 1318060032 kB — достаточно, доказано
+  окнами EXP-002..007), прежний гейт циклился с uninstall-сносом файла.
+  Ветки: `unlimited` → PASS без WARN; число ≥ порога → limits.d-файл
+  (переза)писывается для будущих relogin + WARN «достаточно», install
+  ПРОДОЛЖАЕТ (exit 42 НЕ делается); число < порога → файл + WARN
+  «перелогинься» + exit 42 (relogin реально нужен); `?` (нечитаемый) →
+  прежний exit 42 — консервативно: при неизвестном лимите молча продолжать
+  нельзя (обоснование в докстринге cmd_install). Запись файла вынесена в
+  локальную `ml_write()` (одинакова во всех ветках).
+- **uninstall слой 4/5** (`lib/commands.sh`, cmd_uninstall): limits.d-файл
+  БОЛЬШЕ НЕ СНОСИТСЯ — «слой 4/5: limits.d — НЕ трогаем (безвреден;
+  переживает uninstall ради будущих сессий)». Снос файла был половиной
+  memlock-цикла (install: файл+42 ↔ uninstall: файл снесён). Докстринги
+  cmd_install/cmd_uninstall (ход слоёв + Побочные эффекты) обновлены.
+- **Батарея** (`tests/run_checks.sh`): §17 — ассерт (в) ml=unlimited → PASS
+  без memlock-WARN (на уже идущем happy-path install); новая §17b —
+  (а) ml=1318060032 → rc 0 + WARN «достаточно» + sudo tee файла в faux-логе;
+  (б) ml=1000 → rc 42 + WARN «ПЕРЕЛОГИНЬСЯ» + sudo tee; §24 — (г) ассерт
+  перевёрнут: в faux-логе uninstall НЕТ слова про limits.d-файл (было:
+  ассерт на `sudo rm -f`).
+- **SPEC.md** (границы в той же дельте, dev-flow): §3 install — memlock-гейт
+  по порогу 8388608 kB вместо «unlimited»; §3 uninstall — limits.d НЕ
+  трогается.
+
+### How it was checked internally
+- `bash tests/run_checks.sh` → **ИТОГО: PASS=336 FAIL=0** (было 333: +3
+  ассерта (а)(б)(в), (г) — замена существующего; два прогона подряд —
+  стабильно; §17b оба сценария зелёные).
+- `bash -n gfctl lib/*.sh tests/run_checks.sh` — OK; `py_compile tpl/python/*.py` — OK.
+- md5 бенч-фикстуры не тронут (батарейный md5-гейт §32 PASS).
+
+### Not checked internally (BLOCKED-EXTERNAL)
+- Живой путь EXP-008/FAEX (ml=1318060032, без pam_limits): подтвердить на
+  машине после деплоя — `gfctl install` доходит до весов/юнитов с WARN
+  «достаточно», повторный цикл install↔uninstall не требует relogin.
+
+### Ограничения / допущения
+- Порог 8 GiB — инженерный минимум (все наблюдаемые ulimit ≥ 105 GiB);
+  не производная от профиля (RAM-гейты — отдельный механизм, не тронут).
+- doctor по-прежнему печатает WARN при ml ≠ unlimited (строка «не
+  unlimited; юнит этапа 1.2 потребует limits.d») — на FAEX теперь
+  формально шумит при достаточном лимите; не правил (вне списка фикса).
+
+### Out-of-scope proposals
+- doctor: синхронизировать memlock-строку с порогом 8 GiB (одна ветка в
+  cmd_doctor) — при следующем касании doctor.
