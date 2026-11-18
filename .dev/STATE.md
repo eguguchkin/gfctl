@@ -23,8 +23,12 @@ part>pin (sha арбитр), --check-types die, json_str, WARN probe_context п�
 
 ## Next (этап 4)
 
-1. **Перепланировать EXP-008/009 под ai-расклад** (машины ai-owned, hipfire-прод на 11435 —
-   gufo-порт/юзер/сценарий обновить) → brief-дельта EXP.
+1. **Перепланировать EXP-008/009 под ai-расклад** — **ПЕРЕПЛАНИРОВАНО (2026-11-18)**:
+   заготовки EXP-008/009 обновлены (ai/пути /home/ai, hfctl off под ai + возврат linger,
+   хардлинки из ~/gufo-models + ~/gfctl-acc-models, EXP-009 фаза 1 = hfctl off → linger →
+   gfctl on → ребут [старая фаза off была дефектна: снимала юниты и linger], оговорки
+   device-mismatch «не грозит по дизайну — container_up всегда rm+run» и GPU-ready) →
+   дельта: `.dev/tasks/4/4.2-EXP-replan.md`, отчёт: `4.2-EXP-replan-report.md`.
 2. Окна EXP-008 (доставка с нуля) → EXP-009 (ребут-приёмки) — по GO пользователя.
 3. Финал этапа 4 → пуш пользователем.
 

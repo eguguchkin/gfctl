@@ -69,7 +69,7 @@ probe'ом. После успешного probe — `wait_health` без вто�
   `gguf_ffn_i16.gguf` (25 на ffn → зелёный, I-тип не весовой формат),
   `gguf_indexer_bf16.gguf` (30 вне ffn → зелёный + WARN «BF16»);
   прежние 10 фикстур байт-в-байт не изменились;
-- ассерты: §4 +6 (3 rc-кейса + 2 display-имени «IQ1_M»/«BF16» не unknown);
+- ассерты: §4 +5 (3 rc-кейса + 2 display-имени «IQ1_M»/«BF16» не unknown); [правка review-r1 note1: было ошибочно «+6»]
 - спека: `.dev/SPEC.md` §3 (models) + §5 (hard-rules) — формулировка
   границы «низкобитные IQ/BF16/MXFP4/неизвестные в FFN → КРАСНЫЙ».
 
@@ -145,7 +145,7 @@ F21 (урезание было опровергнуто; ветка «канон
 | `tpl/python/gguf_type_check.py` | п.3 канон TYPE_NAMES + RED_TYPES |
 | `tests/make_fixtures.py` | п.3 три новых фикстуры |
 | `tests/fixtures/gguf_{ffn_iq1_m,ffn_i16,indexer_bf16}.gguf` | новые ассеты (детерминированные) |
-| `tests/run_checks.sh` | ассерты §4(+6)/§5(+1)/§9(+3)/§26b(+1)/§28(+1)/§43(+5)/§44(+2)/§45(+2) |
+| `tests/run_checks.sh` | ассерты §4(+5)/§5(+1)/§9(+3)/§26b(+1)/§28(+1)/§43(+7)/§44(+2)/§45(+2) [правка review-r1 note1: было §4(+6)/§43(+5)] |
 | `gfctl` | usage-шапка: install описывает probe-шаг |
 | `.dev/SPEC.md` | §3 install (нюанс идемпотентности), §3 models + §5 (граница RED каноном) |
 
