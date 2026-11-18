@@ -29,8 +29,16 @@ part>pin (sha арбитр), --check-types die, json_str, WARN probe_context п�
    gfctl on → ребут [старая фаза off была дефектна: снимала юниты и linger], оговорки
    device-mismatch «не грозит по дизайну — container_up всегда rm+run» и GPU-ready) →
    дельта: `.dev/tasks/4/4.2-EXP-replan.md`, отчёт: `4.2-EXP-replan-report.md`.
-2. Окна EXP-008 (доставка с нуля) → EXP-009 (ребут-приёмки) — по GO пользователя.
-3. Финал этапа 4 → пуш пользователем.
+2. Окна EXP-008/009 — **ПРОЙДЕНЫ (2026-11-18 вечер, по GO)**: EXP-008 PASS (доставка с нуля FAEX
+   flash-multi: install→probe 262144→smoke→agent-check 4/4, реф. EXP-007 сошлись; 0 трафика весов;
+   digest-пин gufo-runtime@sha256:99e9b547…; инцидент pull-висяка blob-CDN — kill+retry, history).
+   EXP-009 PASS с контингентом: после ребута gfctl-serve падал циклом — **serve-юнит не несёт
+   GFCTL_DIR/GFCTL_MODELS** (дефолты $HOME/gufo + 27b-single) → Environment= добавлены руками →
+   самоподъём OK, verify PASS (smoke, device-mismatch нет). **DEFECT в бэклог: юнит-tpl render
+   Environment=** (правка по циклу). verify нюанс: HFCTL_HEALTH=absent (PATH-нюанс), прод вернут
+   вручную (healthy 30 с). gufo-стек погашен (gfctl off), hfctl-прод возвращён.
+3. Финал этапа 4: defect serve-юнит-Environment (по циклу) + 4.3 minor-polish (4 пункта) + пуш —
+   пользователь.
 
 Fix-round counter: F1–F4 + fix-r1 (hfctl) закрыты. Правило касания батареи: reuse=none ассерт (есть §45).
 
