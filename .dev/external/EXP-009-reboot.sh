@@ -88,7 +88,7 @@ case "$PHASE" in
     echo "== EXP-009 фаза 1 (prep): hfctl off под ai → linger → gfctl on ($(date -Is))"
     $SSH "$GF_ACC_USER@$GF_ACC_HOST" 'bash -s' <<'REMOTE' || {
       set -u
-      GF="$HOME/gufo/gfctl"
+      GFCTL_DIR="$HOME/gfctl-acc" GFCTL_MODELS="$HOME/gfctl-acc-models" GF="$GFCTL_DIR/gfctl"
       echo "== hfctl-прод: гасим ОТ ИМЕНИ ai (юниты disabled → после ребута не встанет; RAM остаётся gufo)"
       if command -v hfctl >/dev/null 2>&1; then
         hfctl off || exit 41
@@ -132,7 +132,7 @@ CHECKLIST
     echo "== EXP-009 фаза 2: сервер сам healthy после ребута ($(date -Is))"
     $SSH "$GF_ACC_USER@$GF_ACC_HOST" 'bash -s' <<'REMOTE' || {
       set -u
-      GF="$HOME/gufo/gfctl"
+      GFCTL_DIR="$HOME/gfctl-acc" GFCTL_MODELS="$HOME/gfctl-acc-models" GF="$GFCTL_DIR/gfctl"
       echo "== юниты после ребута (подъём рук. командами = 0: только смотрим)"
       systemctl --user is-active gfctl-serve.service || true
       systemctl --user is-active gfctl-watchdog.timer || true
