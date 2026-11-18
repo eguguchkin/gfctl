@@ -9,6 +9,10 @@ RemainAfterExit=yes
 # cgroup — вместе с контейнером gufo (SIGTERM/143).
 KillMode=process
 WorkingDirectory=__STACK_DIR__
+# env диспетчера в юните: без них _boot взял бы дефолты ($HOME/gufo + профили
+# по умолчанию) — дефект EXP-009 (ребут acc-инсталляции = цикл падений).
+Environment=GFCTL_DIR=__GFCTL_DIR__
+Environment=GFCTL_MODELS=__GFCTL_MODELS__
 ExecStart=/usr/bin/env bash __STACK_DIR__/gfctl _boot
 # Страховка при systemctl stop живого юнита; рабочий stop — gfctl off
 # (у завершённого oneshot ExecStop не стреляет).

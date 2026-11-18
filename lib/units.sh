@@ -4,7 +4,7 @@
 # SPEC §2 «вне каталога»); таймер — статичный (плейсхолдеров нет).
 # serve-юнит = boot-юнит (отдельного gfctl-boot НЕТ: SPEC §2 «юниты
 # gfctl-serve*», второй boot-юнит дрался бы за контейнер). Модуль читает
-# UNIT_DIR/UNIT_NAME/CONTAINER/STACK_DIR/TPL_DIR (диспетчер); die — из
+# UNIT_DIR/UNIT_NAME/CONTAINER/STACK_DIR/MODELS_BASE/TPL_DIR (диспетчер); die — из
 # диспетчера. Вызывается из install/use (install_units) и on (autostart_on).
 
 # Назначение: отрендерить один шаблон из tpl/: прочитать файл $1, заменить в
@@ -47,7 +47,9 @@ render_tpl() {
 #   systemd убивает cgroup вместе с контейнером; ExecStart = bash
 #   $STACK_DIR/gfctl _boot; ExecStop = podman rm -f — страховка, рабочий
 #   stop — cmd_off: у завершённого oneshot ExecStop не стреляет), 
-#   gfctl-watchdog.service (__STACK_DIR__) и gfctl-watchdog.timer — статичный
+#   gfctl-watchdog.service (__STACK_DIR__ + Environment=GFCTL_DIR/GFCTL_MODELS —
+#   ре-рендер реальных значений: без них _boot/_watchdog при ребуте взяли бы
+#   дефолты диспетчера $HOME/gufo — дефект EXP-009) и gfctl-watchdog.timer — статичный
 #   tpl без плейсхолдеров, install -m 0644 (OnUnitActiveSec=1min).
 #   enable/start/linger — НЕ здесь (autostart_on).
 #
@@ -67,9 +69,10 @@ install_units() {
   bin="$(command -v podman)" || die "podman не найден в PATH — юниты не собрать"
   mkdir -p "$UNIT_DIR"
   render_tpl "$TPL_DIR/systemd/gfctl-serve.service.tpl" "$UNIT_DIR/$UNIT_NAME-serve.service" \
-    PODMAN_BIN="$bin" STACK_DIR="$STACK_DIR" CONTAINER="$CONTAINER"
+    GFCTL_MODELS="$MODELS_BASE" PODMAN_BIN="$bin" GFCTL_DIR="$STACK_DIR" \
+    STACK_DIR="$STACK_DIR" CONTAINER="$CONTAINER"
   render_tpl "$TPL_DIR/systemd/gfctl-watchdog.service.tpl" "$UNIT_DIR/$UNIT_NAME-watchdog.service" \
-    STACK_DIR="$STACK_DIR"
+    GFCTL_MODELS="$MODELS_BASE" GFCTL_DIR="$STACK_DIR" STACK_DIR="$STACK_DIR"
   # таймер — статичный (плейсхолдеров нет): копировать как есть
   install -m 0644 "$TPL_DIR/systemd/gfctl-watchdog.timer.tpl" "$UNIT_DIR/$UNIT_NAME-watchdog.timer"
 }

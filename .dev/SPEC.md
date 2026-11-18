@@ -66,7 +66,7 @@ gfctl install             # preflight → веса → юниты → старт
 | `gfctl agent-check` | **Агентская самопроверка** (см. §7): сессия 15 ходов, follow-up-лестница 5k/25k/100k, [док][вопрос], рестарт-restore — wall-цифры + сравнение с референсами (WARN при регрессии >25%) |
 | `gfctl cache [--verify]` | Сводка кэша из логов (configured/skipped/evicted) + `/metrics` cached_total; `--verify` — контрольный follow-up + рестарт-проба |
 | `gfctl doctor` | Диагностика без записи: ОС, /dev/kfd, render-группа, memlock, linger, RAM-гейты всех профилей (цифрами), диск под веса, порт, **gpu-lock** (кто держит /dev/kfd — предупреждение о hfctl-проде) |
-| `gfctl models [--check-types]` | Скачано vs требуется по профилям, sha-статус, свободное место; `--check-types [сет|профиль]` — pre-check GGUF-типов (низкобитные IQ — IQ1_S/IQ1_M/IQ2_*/IQ3_XXS —, BF16/MXFP4/неизвестные в FFN → КРАСНЫЙ «не загрузится»; display-имена — канон ggml enum, BF16=30 — F20, 4.2; лишние аргументы → die) |
+| `gfctl models [--check-types]` | Скачано vs требуется по профилям, sha-статус, свободное место; `--check-types [сет|профиль]` — pre-check GGUF-типов (низкобитные IQ — IQ1_S/IQ1_M/IQ2_*/IQ3_XXS —, BF16/MXFP4/неизвестные в FFN → КРАСНЫЙ «не загрузится»; display-имена — канон ggml enum, BF16=30 — F20, 4.2; 41/42=Q1_0/Q2_0 — форк движка (ggml.h:439–440, 4.3); лишние аргументы → die) |
 | `gfctl uninstall [--purge-models] [--purge-image]` | Слоёная зачистка: контейнер, юниты, `~/gufo` (модели щадятся по умолчанию); `limits.d/99-gfctl-memlock.conf` НЕ трогается (4.1-F2: безвреден, переживает uninstall ради будущих relogin) |
 
 ## 4 · Модель состояний

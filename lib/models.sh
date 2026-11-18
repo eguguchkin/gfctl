@@ -119,7 +119,8 @@ free_disk_gib() {
 # @param 4: /^[0-9a-f]{64}$/ # sha — пин sha256
 # @stdout string     # «нужно/свободно», «SKIP:», «PASS:», ход попыток с URL (log)
 # @stderr string     # WARN при нехватке места / SHA-MISMATCH / сетевом отказе /
-#                    # отказе зеркала (фоллбэк)
+#                    # отказе зеркала (фоллбэк) / .part больше пин-размера
+#                    # (обзор 1.1 №5: curl 416, лечится только удалением .part)
 # @returns integer   # 0 — файл на месте и sha OK; 1 — отказ (место/сеть/sha)
 download_file() {
   local url="$1" dest="$2" size="$3" sha="$4"
@@ -142,6 +143,11 @@ download_file() {
     if [ "$psz" = "$size" ]; then
       log "локальный $(basename "$part") уже полного размера ($size B) — сеть не нужна"
       ok=1
+    fi
+    # review 1.1 №5 / 4.3 п.2: .part крупнее пина curl -C - отклонит (HTTP 416,
+    # все 3 попытки) — до SHA-арбитража дело не дойдёт, лечится только руками.
+    if [ "$psz" -gt "$size" ]; then
+      warn "$(basename "$part") БОЛЬШЕ пин-размера ($psz B > $size B) — докачка не завершится (curl 416): удали .part руками (rm \"$part\") и повтори gfctl models download"
     fi
   fi
   need_gib=$(awk -v b="$remaining" 'BEGIN{printf "%.1f", b/1073741824}')

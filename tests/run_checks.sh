@@ -667,6 +667,15 @@ grep -q '^ExecStop=.*podman rm -f gufo$' "$ud/gfctl-serve.service" \
   && ok "serve-юнит: ExecStop = podman rm -f (страховка)" || bad "serve-юнит ExecStop"
 grep -q '_watchdog' "$ud/gfctl-watchdog.service" \
   && ok "watchdog-юнит: ExecStart=_watchdog" || bad "watchdog-юнит"
+# defect EXP-009: юниты несли env диспетчера → _boot/_watchdog брали дефолты
+# ($HOME/gufo) — ребут acc-инсталляции падал циклом. Рендер обязан вшить
+# реальные STACK_DIR/MODELS_BASE (харнесс §17: $TMP/stack и $TMP/stack/models).
+grep -Fqx "Environment=GFCTL_DIR=$TMP/stack" "$ud/gfctl-serve.service" \
+  && grep -Fqx "Environment=GFCTL_MODELS=$TMP/stack/models" "$ud/gfctl-serve.service" \
+  && grep -Fqx "Environment=GFCTL_DIR=$TMP/stack" "$ud/gfctl-watchdog.service" \
+  && grep -Fqx "Environment=GFCTL_MODELS=$TMP/stack/models" "$ud/gfctl-watchdog.service" \
+  && ok "юниты: Environment=GFCTL_DIR/GFCTL_MODELS = реальные пути стека (defect EXP-009)" \
+  || bad "юниты: Environment= не отрендерен реальными путями (defect EXP-009)"
 grep -q '^OnUnitActiveSec=1min$' "$ud/gfctl-watchdog.timer" \
   && ok "таймер: OnUnitActiveSec=1min" || bad "таймер 1 мин"
 grep -q 'sudo loginctl enable-linger' "$FAUXLOG" \
@@ -1604,7 +1613,7 @@ cmd_install --profile 27b-single" 2>&1); ip3_rc=$?; set -e
 [ "$ip3_rc" = 0 ] && ! grep -q 'probe-подбор' <<<"$out" && [ ! -e "$TMP/stack/logs/probe-27b-single-1.log" ] \
   && ok "install single: probe нет (лестница '-')" || bad "install single probe (rc=$ip3_rc)"
 
-echo "== 44. status --json: экранирование спецсимволов (4.2 п.6)"
+echo "== 44. status --json + smoke: экранирование спецсимволов (4.2 п.6; 4.3 п.3/п.4)"
 set +e
 GFCTL_BIND='a"b\c' GFCTL_PORT=8198 ./gfctl status --json > "$TMP/status_esc.json" 2>&1; se_rc=$?; set -e
 if [ "$se_rc" = 0 ] && python3 -m json.tool "$TMP/status_esc.json" >/dev/null 2>&1 \
@@ -1615,17 +1624,31 @@ else
 fi
 LOGQ="$TMP/logq"
 printf 'event=load_completed speculative=dflash2 sessions=1 context_tokens=262144 model=%s sessions=1\n' 'Bad"Na\me' > "$LOGQ"
-python3 - <<'PYEOF' &
+# 4.3 п.4 (review 4.2 №5): порт выбирает ЯДРО (bind :0 → заведомо свободен)
+# вместо фиксированного 8098 — занятый порт на машине больше не валит ассерт
+# шумом. Слушатель сам печатает выбранный порт; батарея ждёт файл (замена
+# sleep 0.4), guard-ассерт отделяет «слушатель не поднялся» от «escape сломан».
+python3 - > "$TMP/qport" <<'PYEOF' &
 import socket, time
 s = socket.socket()
 s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-s.bind(("127.0.0.1", 8098)); s.listen(5)
+s.bind(("127.0.0.1", 0)); s.listen(5)
+print(s.getsockname()[1], flush=True)
 time.sleep(40)
 PYEOF
 QLID=$!
-sleep 0.4
+for _ in 1 2 3 4 5 6 7 8 9 10; do
+  if [ -s "$TMP/qport" ]; then break; fi
+  sleep 0.2
+done
+QPORT=$(cat "$TMP/qport")
+if [ -n "$QPORT" ] && kill -0 "$QLID" 2>/dev/null; then
+  ok "§44: слушатель на свободном порту $QPORT поднят (bind :0 — занятый порт не мешает)"
+else
+  bad "§44: свободный порт/слушатель (QPORT='$QPORT')"
+fi
 set +e
-GFCTL_FAUX_INSPECT=running GFCTL_FAUX_PODMAN_LOGS="$LOGQ" GFCTL_PORT=8098 \
+GFCTL_FAUX_INSPECT=running GFCTL_FAUX_PODMAN_LOGS="$LOGQ" GFCTL_PORT="$QPORT" \
   frun status --json > "$TMP/status_q.json" 2>&1; q_rc=$?; set -e
 python3 - "$TMP/status_q.json" <<'EOF' && ok "status --json живой: model с кавычкой/бэкслешем экранирован, json валиден" || bad "status --json model escape (rc=$q_rc)"
 import json, sys
@@ -1635,6 +1658,18 @@ assert d["health"] == "ok", d
 EOF
 kill "$QLID" 2>/dev/null || true
 wait "$QLID" 2>/dev/null || true
+# 4.3 п.3: smoke-тело с тем же именем-с-кавычкой/бэкслешем — тело должно
+# остаться валидным JSON с round-trip имени (было: интерполяция без
+# экранирования ломала тело).
+: > "$FAUXLOG"; rm -f "$FAUXCNT.curl"
+set +e; out=$(GFCTL_FAUX_INSPECT=running GFCTL_FAUX_PODMAN_LOGS="$LOGQ" frun smoke 2>&1); smq_rc=$?; set -e
+smbody=$(grep -F -- '-d {"model"' "$FAUXLOG" | head -1 | sed 's/^.* -d //') || true
+if [ "$smq_rc" = 0 ] && grep -q 'SMOKE: OK' <<<"$out" \
+   && printf '%s' "$smbody" | python3 -c 'import json,sys; d=json.load(sys.stdin); assert d["model"]=="Bad\"Na\\me", d' 2>/dev/null; then
+  ok "smoke: имя с кавычкой/бэкслешем — тело валидный JSON, model round-trip (4.3 п.3)"
+else
+  bad "smoke escape (rc=$smq_rc)"; tail -4 <<<"$out"; printf 'body: %s\n' "$smbody"
+fi
 
 echo "== 45. reuse=none ассерт (4.2 п.8, правило STATE): кэш не переиспользуется → restore FAIL, rc 1"
 gf 'write_canon 27b-single 1 262144' >/dev/null 2>&1

@@ -132,6 +132,28 @@ wait_health() {
   return 1
 }
 
+# Назначение: экранирование строки для вставки в JSON-тело smoke-запроса
+#   (4.3 п.3 / review 4.2 №4: имя модели из лога с «"»/«\» ломало JSON тела
+#   запроса). Локальная копия json_str (commands.sh, 4.2 п.6): health.sh
+#   source'ится РАНЬШЕ commands.sh и не должен от него зависеть; имя другое,
+#   чтобы канон-функция не переопределялась при полной сборке диспетчера.
+#
+# Побочные эффекты: только печать в stdout; ничего не меняет.
+#
+# Ограничения/допущения: чистая функция; прочие управляющие символы (< 0x20)
+#   не экранируются (как в json_str — живой источник спецсимволов — имена
+#   gufo: пробелы/кавычки, F20).
+#
+# @param 1: string    # исходная строка
+# @stdout string     # содержимое JSON-строки (БЕЗ обрамляющих кавычек)
+# @returns integer   # всегда 0
+json_escape() {
+  local s="$1"
+  s=${s//\\/\\\\}; s=${s//\"/\\\"}
+  s=${s//$'\t'/\\t}; s=${s//$'\n'/\\n}; s=${s//$'\r'/\\r}
+  printf '%s' "$s"
+}
+
 # Назначение: смоук-проверка живого сервера — 3 запроса POST
 #   /v1/chat/completions (curl -m 300; код / проза / математика) с
 #   "model" = ROUTE_MODEL (имя движка из load_completed; пуст → die
@@ -147,7 +169,8 @@ wait_health() {
 #   «ответ: …» от smoke_resp.py в stdout, warn — в stderr. Файлы не меняет.
 #
 # Ограничения/допущения: требует globals ROUTE_* (заполняет wait_load/
-#   parse_route вызывающего) и TPL_DIR; промпты независимы — провал одного
+#   parse_route вызывающего) и TPL_DIR; ROUTE_MODEL экранируется json_escape
+#   в JSON тела (4.3 п.3); промпты независимы — провал одного
 #   не мешает остальным; провал — die(): процесс завершается с кодом 1.
 #   Худший бюджет — 3×2×(300+15) с — интерактивные вызывающие
 #   (install/use/smoke).
@@ -169,7 +192,7 @@ smoke() {
       try=$((try + 1))
       if out=$(curl -fsS -m 300 "http://127.0.0.1:$(canon_port)/v1/chat/completions" \
         -H 'Content-Type: application/json' \
-        -d "{\"model\":\"$ROUTE_MODEL\",\"messages\":[{\"role\":\"user\",\"content\":\"$prompt\"}],\"max_tokens\":200}" 2>/dev/null) && \
+        -d "{\"model\":\"$(json_escape "$ROUTE_MODEL")\",\"messages\":[{\"role\":\"user\",\"content\":\"$prompt\"}],\"max_tokens\":200}" 2>/dev/null) && \
          printf '%s' "$out" | python3 "$TPL_DIR/python/smoke_resp.py"; then
         break
       fi

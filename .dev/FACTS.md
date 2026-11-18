@@ -94,6 +94,20 @@ gfctl off → hfctl on HEALTHY 15 с → smoke OK.
 - ⚠️ rsync в ocbox отсутствует: EXP-транспорт = tar|ssh (правка 2026-11-17,
   все три EXP).
 
+## F25 · curl -C - при .part>пина: ответ endpoint-зависим, «416» — не универсален (проба ocbox, 2026-11-18)
+- Проба EXP-010 из ocbox-контейнера (реальный пин set_flash #1, ~10.4 MiB,
+  oversized .part +1000 B): WARN 4.3 п.2 — первой строкой ДО попыток ✓, но
+  HF-резолв НЕ отклонил Range за EOF — curl завершился ok, файл докачан,
+  sha НЕ совпал → **SHA-MISMATCH → dest/.part удалены** (само-восстановление
+  4.2 сработало, rc=1). Премиса review 1.1 №5 «curl отклонит все 3 попытки
+  (416), самовосстановление не сработает» на этом endpoint-поведении не
+  воспроизвелась (CDN-вариативность; машинное окно EXP-010 покажет ветку
+  машины). Практический рецепт WARN («удали .part руками») корректен в
+  обеих ветках; формулировка «(curl 416)» в тексте WARN — упрощение для
+  416-ветки. Контракт 4.3 (WARN-порядок + семантика докачки не менялась)
+  не задет. Проба: `.dev/external/EXP-010-curl416-live.sh` (локальный
+  прогон RESULT: PASS, ветка B).
+
 ## F24 · Миграция стека на нового юзера: данные rsync, стек из tpl/git; sed целей маунтов = разрыв HIPFIRE_HOME (2026-11-18)
 - Вшито в образ `ghcr.io/warpfront/hipfire:0.4.7` (image inspect; размер 3.69 GB — моделей внутри нет):
   `ENV HOME=/home/hipfire`, `HIPFIRE_HOME=/home/hipfire/.hipfire`. Entrypoint (`/usr/local/bin/hipfire-entrypoint`)
