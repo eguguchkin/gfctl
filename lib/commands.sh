@@ -758,6 +758,205 @@ PY
     "$(printf '%s\n' "${tps[@]}" | sort -n | sed -n 2p)"
 }
 
+# ── 3.1: cache (сводка кэша + --verify) и watch (дашборд) ────────────────────
+
+# Назначение: ЧИСТЫЙ фильтр кэш-конфигурации — текст лога на stdin; берёт
+#   ПОСЛЕДНЮЮ строку `event=configured` (формат живого лога FX-W1b:
+#   «[cache] schema=component-cache-v1 event=configured sessions=1 …
+#   capacity_bytes=… automatic_bytes=… disk_capacity_bytes=… ram_cache=on…»)
+#   и пишет глобалы CC_SESSIONS/CC_CAPACITY/CC_DISK/CC_RAMCACHE/CC_AUTOMATIC
+#   ('' = поля нет). Поля grep -oE с \b-границей (capacity_bytes не ловит
+#   disk_capacity_bytes) + cut — паттерн parse_route. stdout пуст.
+#
+# Побочные эффекты: только чтение stdin и запись пяти глобалов.
+#
+# Ограничения/допущения: отсутствие строки — НОРМА (кэш не настроен/лог
+#   пуст): глобалы '', rc 0 всегда; «последняя строка побеждает» (последний
+#   recreate); форматы skipped/evicted НЕ разбираются здесь (в факт-базе
+#   их нет — EXP-007 соберёт образцы, cmd_cache считает вхождения).
+#
+# @stdin string             # текст лога контейнера (podman logs 2>&1)
+# @returns integer          # всегда 0
+parse_configured() {
+  local line
+  CC_SESSIONS=""; CC_CAPACITY=""; CC_DISK=""; CC_RAMCACHE=""; CC_AUTOMATIC=""
+  line=$(grep 'event=configured' 2>/dev/null | tail -n 1) || true
+  [ -n "$line" ] || return 0
+  CC_SESSIONS=$(printf '%s\n' "$line" | grep -oE 'sessions=[0-9]+' | tail -n 1 | cut -d= -f2-) || true
+  CC_CAPACITY=$(printf '%s\n' "$line" | grep -oE '\bcapacity_bytes=[0-9]+' | tail -n 1 | cut -d= -f2-) || true
+  CC_DISK=$(printf '%s\n' "$line" | grep -oE '\bdisk_capacity_bytes=[0-9]+' | tail -n 1 | cut -d= -f2-) || true
+  CC_RAMCACHE=$(printf '%s\n' "$line" | grep -oE '\bram_cache=(on|off)' | tail -n 1 | cut -d= -f2-) || true
+  CC_AUTOMATIC=$(printf '%s\n' "$line" | grep -oE '\bautomatic_bytes=[0-9]+' | tail -n 1 | cut -d= -f2-) || true
+  return 0
+}
+
+# Назначение: тип файловой системы каталога (аргумент) — `stat -f -c %T`
+#   (tmpfs-детект cache --verify: disk-тир на tmpfs переживает только до
+#   ребута). Обёртка ради батареи: faux stat подкладывается через PATH.
+#
+# Побочные эффекты: подпроцесс stat; печать типа в stdout ('' = сбой stat).
+#
+# Ограничения/допущения: GNU stat (целевые машины — GNU); сбой/неизвестная
+#   ФС → пустая строка, не краш; сравнение с 'tmpfs' — на вызывающем.
+#
+# @param 1: string          # путь каталога
+# @stdout string            # тип ФС (ext4/btrfs/tmpfs/…) или ''
+# @returns integer          # всегда 0 (сбой stat заглушен)
+fs_type() {
+  stat -f -c %T "$1" 2>/dev/null || true
+}
+
+# Назначение: контрольная часть `gfctl cache --verify` (вызывается из
+#   cmd_cache; порядок фиксированный): (1) контрольный follow-up — python
+#   cacheverify1 (doc 5k → q1 → follow-up по тому же разговору), вердикт
+#   по reuse из тела ответа: live|disk → PASS, none → die «проверь
+#   --cache-ram-bytes» (rc 1); (2) tmpfs-детект — fs_type кэш-каталога,
+#   tmpfs → WARN; (3) рестарт-проба — warn до recreate → container_up
+#   (канон текущего профиля) → wait_health 180 → python cacheverify2
+#   (ход того же разговора; состояние $LOGS_DIR/cache-verify.json):
+#   reuse live|disk → PASS «disk-restore работает (X.Xs)», иначе FAIL
+#   (rc 1 через return — set -e диспетчера завершает процесс).
+#
+# Побочные эффекты: до 3 http-запроса генерации; podman logs/rm/run
+#   (рестарт УБИВАЕТ активные сессии — warn до recreate); запись/удаление
+#   cache-verify.json; ROUTE_* глобалы.
+#
+# Ограничения/допущения: требует ROUTE_MODEL (parse_route здесь —
+#   follow-up/restore ходят с именем из load_completed, F20); rc 1 (FAIL
+#   restore) поднимается через return вызывающему (cmd_cache → роутер).
+#
+# @param 1: profile_id      # канон текущего профиля (рестарт поднимает его)
+# @stdout string            # человекочитаемые строки каждого шага
+# @returns integer          # 0 — follow-up и restore PASS; 1 — restore FAIL
+#   (die при follow-up FAIL/структурных провалах)
+cache_verify() {
+  local prof="$1" state="$LOGS_DIR/cache-verify.json" out reuse w
+  mkdir -p "$LOGS_DIR"
+  parse_route < <(podman logs "$CONTAINER" 2>&1)
+  [ -n "$ROUTE_MODEL" ] || die "cache --verify: модель не загружена (в логе нет model= из load_completed) — сначала gfctl use"
+  echo "-- verify: контрольный follow-up (doc 5k → q1 → follow-up, reuse из тела ответа)"
+  out=$(GFCTL_AGENT_STATE="$state" python3 "$TPL_DIR/python/agent_check.py" cacheverify1 "$(canon_port)" "$ROUTE_MODEL") \
+    || die "cache --verify: follow-up структурно не прошёл — причина в stderr выше"
+  printf '%s\n' "$out"
+  reuse=$(grep '^CHECK cacheverify ' <<<"$out" | grep -oE 'reuse=[a-z]+' | head -n1 | cut -d= -f2-) || true
+  case "$reuse" in
+    live|disk) echo "PASS: follow-up переиспользовал кэш (reuse=$reuse)" ;;
+    *) die "cache --verify: follow-up не переиспользовал кэш (reuse=${reuse:-?}) — проверь --cache-ram-bytes (SPEC §3)" ;;
+  esac
+  if [ "$(fs_type "$STACK_DIR/cache/$prof")" = "tmpfs" ]; then
+    warn "кэш-каталог $STACK_DIR/cache/$prof на tmpfs — disk-тир переживает только до ребута"
+  fi
+  warn "cache --verify: рестарт ПЕРЕЗАПУСКАЕТ контейнер — активные сессии сервера будут потеряны (рестарт поднимает канон профиля $prof)"
+  echo "-- verify: рестарт-проба (проверяет disk-тир кэша)"
+  container_up "$prof"
+  wait_health 180
+  out=$(GFCTL_AGENT_STATE="$state" python3 "$TPL_DIR/python/agent_check.py" cacheverify2 "$(canon_port)" "$ROUTE_MODEL") \
+    || die "cache --verify: restore-ход структурно не прошёл — причина в stderr выше"
+  printf '%s\n' "$out"
+  rm -f "$state"
+  reuse=$(grep '^CHECK restore ' <<<"$out" | grep -oE 'reuse=[a-z]+' | head -n1 | cut -d= -f2-) || true
+  w=$(grep '^CHECK restore ' <<<"$out" | grep -oE 'turn2=[0-9.]+' | head -n1 | cut -d= -f2-) || true
+  if [ "$reuse" = "live" ] || [ "$reuse" = "disk" ]; then
+    echo "PASS: disk-restore работает (${w:-?}s, reuse=$reuse)"
+    return 0
+  fi
+  echo "FAIL: disk-restore не сработал (reuse=${reuse:-?}) — проверь --cache-disk и файловую систему кэш-каталога"
+  return 1
+}
+
+# Назначение: cmd cache [--verify] — сводка кэша (rc 0 всегда, как doctor):
+#   каталог кэша профиля + du -sb (как status) → parse_configured из лога
+#   (configured: sessions/ram-cache/capacity/automatic/disk в GiB; строки
+#   нет — «кэш не настроен», норма) → счётчики skipped/evicted — grep -c
+#   вхождения БЕЗ разбора формата (EXP-007 соберёт образцы) → /metrics
+#   llamacpp:prompt_tokens_cached_total (ключ подтверждён FX-W5; нет
+#   ключа/эндпоинта → «?», НЕ фатально). --verify → cache_verify (см.
+#   выше; её rc 1 = rc команды). Лишние аргументы → die.
+#
+# Побочные эффекты: podman logs/curl/du/awk-подпроцессы; при --verify —
+#   всё из cache_verify (включая рестарт контейнера). Файлы стека не
+#   меняет (кроме state-файла cache-verify.json в --verify).
+#
+# Ограничения/допущения: мёртвый порт/контейнер → пустые логи и «?» по
+#   /metrics — сводка честная, rc 0; порт — canon_port (curl), контейнер —
+#   CONTAINER (podman logs).
+#
+# @param 1: [--verify]      # единственный допустимый аргумент
+# @stdout string            # строки сводки (+ шаги verify)
+# @returns integer          # 0 — сводка (и PASS verify); 1 — FAIL verify
+cmd_cache() {
+  local verify=0
+  case "${1:-}" in
+    "")       ;;
+    --verify) verify=1 ;;
+    *)        die "cache: неизвестный аргумент '${1:-}' — доступно: --verify" ;;
+  esac
+  [ -n "${2:-}" ] && die "cache: лишние аргументы после '${1:-}' — доступно: --verify"
+  local prof; prof=$(cur_profile)
+  local cache_dir="$STACK_DIR/cache/$prof" cache_b="" cache_gib=""
+  echo "== gfctl cache — сводка кэша (профиль $prof)"
+  if [ -d "$cache_dir" ]; then
+    cache_b=$(du -sb "$cache_dir" 2>/dev/null | awk '{print $1}') || true
+    [ -n "$cache_b" ] && cache_gib=$(awk -v b="$cache_b" 'BEGIN{printf "%.1f", b/1073741824}')
+  fi
+  echo "каталог: $cache_dir (${cache_gib:-0.0} GiB)"
+  parse_configured < <(podman logs "$CONTAINER" 2>/dev/null)
+  if [ -n "$CC_CAPACITY" ]; then
+    printf 'configured: sessions %s | ram-cache %s | capacity %s GiB | automatic %s GiB | disk %s GiB\n' \
+      "${CC_SESSIONS:-?}" "${CC_RAMCACHE:-?}" \
+      "$(awk -v b="$CC_CAPACITY" 'BEGIN{printf "%.1f", b/1073741824}')" \
+      "$(awk -v b="${CC_AUTOMATIC:-0}" 'BEGIN{printf "%.1f", b/1073741824}')" \
+      "$(awk -v b="${CC_DISK:-0}" 'BEGIN{printf "%.1f", b/1073741824}')"
+  else
+    echo "configured: строки event=configured в логе нет (кэш не настроен или лог пуст)"
+  fi
+  local skipped evicted cached="?" mt
+  skipped=$(podman logs "$CONTAINER" 2>/dev/null | grep -c 'event=skipped') || true
+  evicted=$(podman logs "$CONTAINER" 2>/dev/null | grep -c 'event=evict') || true
+  echo "счётчики: skipped ${skipped:-0} | evicted ${evicted:-0} (вхождения в логе, формат не разбирается — EXP-007)"
+  mt=$(curl -fsS -m 5 "http://127.0.0.1:$(canon_port)/metrics" 2>/dev/null \
+    | awk '$1 == "llamacpp:prompt_tokens_cached_total" {print $2; exit}') || true
+  [ -n "$mt" ] && cached="$mt"
+  echo "/metrics llamacpp:prompt_tokens_cached_total: $cached (best-effort)"
+  [ "$verify" = 1 ] || return 0
+  cache_verify "$prof"
+}
+
+# Назначение: cmd watch [--interval N] — живой дашборд (SPEC §3/§8): bash
+#   ТОЛЬКО разбирает --interval N|--interval=N (дефолт 2; целое ≥1, иначе
+#   die — паттерн hfctl cmd_watch 1:1) и exec python3
+#   tpl/python/watch_tui.py с env GFCTL_WATCH_PORT/INTERVAL/CONTAINER
+#   (argv не используется — python сам решает TUI/plain по isatty);
+#   rc = rc python.
+#
+# Побочные эффекты: exec заменяет процесс диспетчера python-харнесом
+#   (далее — всё из watch_tui.py: /metrics, host /proc+/sys, podman logs).
+#
+# Ограничения/допущения: model в python приходит из лога (load_completed
+#   в сиде podman logs), не из .env — из env передаются только
+#   порт/интервал/контейнер; GFCTL_WATCH_TICKS (батарейный шов) проходит
+#   сквозь exec без правки.
+#
+# @param 1..N: string[]     # --interval N | --interval=N (дефолт 2 с)
+# @stdout string            # весь вывод watch — из python
+# @returns integer          # не возвращается — exec; ошибки аргументов: die
+cmd_watch() {
+  local usage="использование: gfctl watch [--interval N]" interval=2
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --interval=*) interval="${1#*=}" ;;
+      --interval)   [ $# -ge 2 ] || die "$usage"; interval="$2"; shift ;;
+      *)            die "watch: неизвестный аргумент '$1' — $usage" ;;
+    esac
+    shift
+  done
+  isint "$interval" || die "watch: интервал должен быть целым числом секунд, получено '$interval'"
+  [ "$interval" -ge 1 ] || die "watch: интервал должен быть ≥ 1 с"
+  GFCTL_WATCH_PORT="$(canon_port)" GFCTL_WATCH_INTERVAL="$interval" \
+  GFCTL_WATCH_CONTAINER="$CONTAINER" \
+  exec python3 "$TPL_DIR/python/watch_tui.py"
+}
+
 # Назначение: cmd uninstall [--purge-models] [--purge-image] — слоёная
 #   зачистка (SPEC §3; модели и образ по умолчанию ЖИВЫ): ask (не-TTY без
 #   GFCTL_YES → rc 1 — удаление данных только с согласия) → слои ПО ПОРЯДКУ:

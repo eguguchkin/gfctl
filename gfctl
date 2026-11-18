@@ -14,14 +14,16 @@
 #                           — переключить профиль (+recreate)
 #   status [--json]         — профиль / health / роут / кэш / автозапуск
 #   logs [-f] [N]           — логи контейнера
-#   watch [--interval N]    — живой дашборд (/metrics, host, логи)     [этап 3]
+#   watch [--interval N]    — живой дашборд (/metrics, host /proc+/sys, логи)
 #   on | off                — автозапуск вкл / выкл (off = стоп + снятие;
 #                             файлы/веса/образ целы)
 #   uninstall [--purge-models] [--purge-image]
 #   bench                   — фикстура merge_sort (253c7ac5) ×3 по HTTP
 #   smoke                   — health + 3 запроса + роут из лога
-#   agent-check             — агентская самопроверка (SPEC §7)         [этап 3]
-#   cache [--verify]        — сводка кэша из логов + /metrics          [этап 3]
+#   agent-check             — агентская самопроверка (SPEC §7; 25 запросов:
+#                             сессия/лестница/[док][q]/рестарт-restore)
+#   cache [--verify]        — сводка кэша из логов + /metrics; --verify —
+#                             follow-up + рестарт-проба (tmpfs → WARN)
 #   doctor                  — диагностика без записи (гейты всех профилей)
 #   models [--check-types [сет|профиль]]
 #                           — инвентарь весов по сетам / pre-check GGUF-типов
@@ -150,8 +152,9 @@ source "$LIB_DIR/state.sh"      # канон профиля ~/gufo/.env (env > .
 source "$LIB_DIR/serve.sh"      # serve-строка из таблицы + container_up (recreate)
 source "$LIB_DIR/units.sh"      # render_tpl + генерация systemd-user юнитов
 source "$LIB_DIR/health.sh"     # load_completed/http_ready/smoke (роут)
+source "$LIB_DIR/agentcheck.sh" # agent-check (cmp_ref/cmd_agentcheck, этап 3.1)
 source "$LIB_DIR/autostart.sh"  # on/off/up/down + _watchdog/_boot
-source "$LIB_DIR/commands.sh"   # models/doctor/status/install/use/logs/smoke/uninstall
+source "$LIB_DIR/commands.sh"   # models/doctor/status/install/use/logs/smoke/bench/cache/watch/uninstall
 
 # Назначение: справка по командам диспетчера — печать шапки этого файла
 #   (текст между маркерами USAGE-BEGIN/USAGE-END) со снятым префиксом «# ».
@@ -177,8 +180,8 @@ usage() {
 # Побочные эффекты: все побочные эффекты выбранной команды (она и завершает
 #   процесс своим rc); ветка '' печатает usage и завершает exit 1 (bare-вызов
 #   = отсутствие команды, контракт rc-отказов AGENTS.md); ветка «*» — отказ
-#   с выводом в stderr и rc 1; watch/cache/agent-check — die-заглушки этапа 3
-#   (грамматика CLI финальная с 1.1); bench — cmd_bench (этап 2.1).
+#   с выводом в stderr и rc 1; watch/cache/agent-check — cmd_* (этап 3.1,
+#   die-заглушки сняты); bench — cmd_bench (этап 2.1).
 #
 # Ограничения/допущения: работает в верхнеуровневом скоупе диспетчера под
 #   set -euo pipefail: `shift || true` легализует запуск без аргументов;
@@ -204,8 +207,9 @@ case "$cmd" in
   _boot)        cmd_boot "$@" ;;
   --help|-h)    usage; exit 0 ;;
   bench)        cmd_bench "$@" ;;
-  watch|cache|agent-check)
-                die "команда '$cmd' — этап 3 (сейчас — каркас: грамматика CLI)" ;;
+  watch)        cmd_watch "$@" ;;
+  cache)        cmd_cache "$@" ;;
+  agent-check)  cmd_agentcheck "$@" ;;
   "")           usage; exit 1 ;;  # bare-вызов: usage и отказ rc=1
   *)            echo "неизвестная команда '$cmd'. Команды: models [download <сет> | --check-types] | doctor | status [--json] | install | use | logs | watch | on | off | uninstall | bench | smoke | cache | agent-check." \
                   " Профили: $PROFILE_LIST" >&2; exit 1 ;;

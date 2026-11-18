@@ -29,6 +29,38 @@ PROFILE_DEFAULT=27b-single
 # cache-disk 27b-multi 64 GiB — выровнен по остальным профилям (SPEC §1
 # «cache-disk по умолчанию»; SPEC §5 поле не задаёт — решение task.md OQ №1).
 
+# ── референсы агентских проверок (SPEC §5/§7; секунды; этап 3.1) ────────────
+# Слой скаляров рядом с таблицей (тот же паттерн indirect-раскрытия, что
+# profile_field; НЕ 10-е поле: референс многозначный — сессия/follow-up/
+# restore/docq). '' = референс не снят → cmp_ref даёт WARN «эталон не снят»,
+# сравнение пропускается. Числа — AGENT-CONFIGS п.3 (окно HX-A, 27b-single);
+# flash-multi / 27b-multi / docq — после EXP-007 (окно этапа 3).
+ref_27b_single_session="23.8"    # сессия 15 ходов, total wall
+ref_27b_single_followup="1.7"    # follow-up 25k, turn2 wall (≤)
+ref_27b_single_restore="0.81"    # рестарт-restore @27k
+# ref_<профиль>_docq НЕ снят ни для одного профиля (AGENT-CONFIGS имеет
+# только halogen-число — вне gufo); до EXP-007 — всегда WARN.
+
+# Назначение: значение референса агентской проверки профиля — скаляр
+#   ref_<профиль_без_дефисов>_<метрика> (дефисы → подчёркивания, как в
+#   profile_field). Метрики: session | followup | restore | docq.
+#
+# Побочные эффекты: только печать значения в stdout; файлов и глобалов не
+#   меняет.
+#
+# Ограничения/допущения: неснятый/неизвестный референс = ПУСТОЙ stdout при
+#   rc 0 (сравнение пропускает вызывающий — cmp_ref печатает WARN «не снят»);
+#   метрика не валидируется (опечатка даёт пустоту, как неснятый).
+#
+# @param 1: profile_id      # канонический id профиля
+# @param 2: string          # метрика (session|followup|restore|docq)
+# @stdout string            # секунды ('' = референс не снят)
+# @returns integer          # всегда 0
+ref_get() {
+  local name="ref_$(printf '%s' "$1" | tr '-' '_')_$2"
+  printf '%s\n' "${!name:-}"
+}
+
 # Назначение: N-е поле (1-based, разделитель '|') записи профиля из таблицы
 #   шапки файла: 1 — сет весов, 2 — порог RAM-гейта (целые GiB), 3 — sessions,
 #   4 — context (канон), 5 — cache_ram_bytes, 6 — cache_disk_bytes,

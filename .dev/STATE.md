@@ -1,7 +1,17 @@
 # STATE gfctl (единственная точка правды «где мы сейчас»)
 
-Текущий сабстэдж: **3.1 agent-check + cache + watch** — in-dev
-(round 0/3), task.md от architect готов, запуск developer.
+Текущий сабстэдж: **3.1 agent-check + cache + watch** — CLOSED
+(APPROVED r1: DoD 6/6, батарея 289, curl-отклонение подтверждено Test
+strategy; backlog: reuse=none ассерт при следующем касании).
+
+Остаток этапа 2: агентские референсы flash-multi/docq → EXP-007 (окно:
+FAEX flash-multi 2×262144 + evo 27b-single) → заполнить ref_* в
+profiles + AGENT-CONFIGS + SPEC §5 дельта (провенанс референсов —
+замечание review 3.1 Q3: 1.7/0.81 в спеке — из окна CX flash-next,
+у gufo-27B другие — сверить с живым снятием).
+
+Next step: **GO пользователя на EXP-007** → заполнение ref_* + SPEC дельта
+→ этап 4 (хардening/доставка).
 
 Closed:
 - **1.1** (APPROVED r1), **1.2** (APPROVED r1) → **ЭТАП 1 ЗАКРЫТ**:

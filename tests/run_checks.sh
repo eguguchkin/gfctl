@@ -43,7 +43,16 @@ rc_out() {
 #             GFCTL_FAUX_CNT.curl), chat-completions — скриптовый JSON
 #             (FAILFIRST: 1-й вызов падает, FAILALL: все падают,
 #             EMPTYN="k[,k2]": вызов №k → ПУСТОЙ ответ rc 0 без тела —
-#             2.1-F4, ретрай пустого);
+#             2.1-F4, ретрай пустого); флаг GFCTL_FAUX_CURL_TIMINGS=1
+#             добавляет в chat-ответ "timings" с component_cache.reuse
+#             (значение — GFCTL_FAUX_CURL_REUSE, дефолт live; протокол
+#             окон FX/CX — agent_check.py читает timings из тела);
+#             /metrics — канонический текст с
+#             llamacpp:prompt_tokens_cached_total 539 (файловый оверрайд
+#             GFCTL_FAUX_METRICS; FAILALL валит и его — watch-«недоступен»);
+#   stat     — GFCTL_FAUX_STAT_FSTYPE задан → печать типа ФС (tmpfs-детект
+#             cache --verify); НЕ задан → passthrough в реальный
+#             /usr/bin/stat (модели/doctor живут как раньше);
 #   sleep   — мгновенный (батарея быстрая).
 FAUX="$TMP/faux"; mkdir -p "$FAUX"
 FAUXLOG="$TMP/faux.log"; FAUXCNT="$TMP/faux.cnt"
@@ -116,6 +125,14 @@ case "$*" in
     if [ "${GFCTL_FAUX_CURL_FAILFIRST:-0}" = 1 ] && [ "$n" = 1 ]; then exit 7; fi
     printf '{"choices":[{"text":"def merge_sort(a): return sorted(a)"}],"usage":{"prompt_tokens":20,"completion_tokens":256,"total_tokens":276}}'
     exit 0 ;;
+  *"/metrics"*)
+    n=$(cat "$GFCTL_FAUX_CNT.curl" 2>/dev/null || echo 0)
+    n=$((n + 1)); echo "$n" > "$GFCTL_FAUX_CNT.curl"
+    [ "${GFCTL_FAUX_CURL_FAILALL:-0}" = 1 ] && exit 7
+    if [ -n "${GFCTL_FAUX_METRICS:-}" ]; then cat "$GFCTL_FAUX_METRICS"; else
+      printf '# HELP llamacpp:prompt_tokens_cached_total Total prompt tokens reused from cache\n# TYPE llamacpp:prompt_tokens_cached_total counter\nllamacpp:prompt_tokens_cached_total 539\n'
+    fi
+    exit 0 ;;
   *"/v1/chat/completions"*)
     n=$(cat "$GFCTL_FAUX_CNT.curl" 2>/dev/null || echo 0)
     n=$((n + 1)); echo "$n" > "$GFCTL_FAUX_CNT.curl"
@@ -124,10 +141,30 @@ case "$*" in
     # 2.1-F4: ПУСТОЙ ответ (rc 0, тела нет — smoke_resp.py упадёт на stdin)
     # на вызове №k; список через запятую «1,2» — оба ретрая пустые
     case ",${GFCTL_FAUX_CURL_EMPTYN:-}," in *",$n,"*) exit 0 ;; esac
-    printf '{"choices":[{"message":{"content":"ок"}}]}'
+    # 3.1: timings в теле ответа (протокол окон FX/CX — agent_check.py);
+    # reuse сценарится GFCTL_FAUX_CURL_REUSE (live|disk|none)
+    tim=""
+    if [ "${GFCTL_FAUX_CURL_TIMINGS:-0}" = 1 ]; then
+      tim=",\"timings\":{\"prompt_ms\":120,\"predicted_ms\":800,\"predicted_per_second\":130.5,\"cache_n\":3,\"component_cache\":{\"reuse\":\"${GFCTL_FAUX_CURL_REUSE:-live}\",\"prefilled_tokens\":5}}"
+    fi
+    printf '{"choices":[{"message":{"content":"ок"}}]%s}' "$tim"
     exit 0 ;;
 esac
 exit 0
+EOF
+cat > "$FAUX/stat" <<'EOF'
+#!/usr/bin/env bash
+if [ -n "${GFCTL_FAUX_STAT_FSTYPE:-}" ]; then
+  { printf 'stat'; printf ' %s' "$@"; printf '\n'; } >> "${GFCTL_FAUX_LOG:?}"
+  printf '%s\n' "$GFCTL_FAUX_STAT_FSTYPE"
+  exit 0
+fi
+# passthrough: реальный stat (инвентарь весов/free_disk не должны ломаться);
+# кандидаты — /usr/bin/stat (usrmerge) и /bin/stat (без него)
+for real in /usr/bin/stat /bin/stat; do
+  [ -x "$real" ] && exec "$real" "$@"
+done
+exit 127
 EOF
 cat > "$FAUX/sleep" <<'EOF'
 #!/usr/bin/env bash
@@ -135,7 +172,7 @@ cat > "$FAUX/sleep" <<'EOF'
 exit 0
 EOF
 chmod +x "$FAUX"/*
-if [ "$(ls "$FAUX" | wc -l)" = 6 ]; then ok "faux-bin: 6 заглушек (podman/systemctl/loginctl/sudo/curl/sleep)"; else bad "faux-bin создание"; fi
+if [ "$(ls "$FAUX" | wc -l)" = 7 ]; then ok "faux-bin: 7 заглушек (podman/systemctl/loginctl/sudo/curl/stat/sleep)"; else bad "faux-bin создание"; fi
 
 # frun — процессный запуск ./gfctl с faux-PATH: лог/счётчики/паузы — швы
 # теста; HOME/GFCTL_DIR — в $TMP (никаких следов в реальном home).
@@ -173,6 +210,7 @@ gf() {  # gf <bash-код> — stdout+stderr и rc наружу
     source "$LIB_DIR/profiles.sh";  source "$LIB_DIR/models.sh"
     source "$LIB_DIR/state.sh";     source "$LIB_DIR/serve.sh"
     source "$LIB_DIR/units.sh";     source "$LIB_DIR/health.sh"
+    source "$LIB_DIR/agentcheck.sh"
     source "$LIB_DIR/autostart.sh"; source "$LIB_DIR/commands.sh"
     eval "$1"
   )
@@ -205,12 +243,14 @@ echo "== 1. AGENTS internal checks: bash -n / py_compile"
 if bash -n gfctl lib/*.sh 2>&1; then ok "bash -n gfctl lib/*.sh"; else bad "bash -n gfctl lib/*.sh"; fi
 if python3 -m py_compile tpl/python/*.py 2>&1; then ok "py_compile tpl/python/*.py"; else bad "py_compile tpl/python/*.py"; fi
 
-echo "== 2. диспетчер: bare/garbage/--help; заглушки остались РОВНО у этапа 3 (п.0 Test strategy 2.1: bench — живая)"
+echo "== 2. диспетчер: bare/garbage/--help; этап-3 команды живые (3.1: заглушки сняты РОВНО у agent-check/cache/watch)"
 rc=$(rc_out ./gfctl | head -n 1); usage_out=$(rc_out ./gfctl | tail -n +2)
 [ "$rc" = 1 ] && grep -q 'Команды:' <<<"$usage_out" && grep -q 'gfctl — деплой' <<<"$usage_out" \
   && ok "bare → rc=1 + usage" || bad "bare → rc=1 + usage (rc=$rc)"
 ! grep -q 'bench.*этап' <<<"$usage_out" \
   && ok "usage: bench без пометки [этап 2] (2.1 — живая команда)" || bad "usage bench: пометка этапа осталась"
+! grep -qE '(watch|agent-check|cache).*\[этап 3\]' <<<"$usage_out" \
+  && ok "usage: watch/agent-check/cache без пометки [этап 3] (3.1 — живые)" || bad "usage этап-3: пометка осталась"
 rc=$(rc_out ./gfctl garbage | head -n 1); gar_out=$(rc_out ./gfctl garbage | tail -n +2)
 [ "$rc" = 1 ] && grep -q 'неизвестная команда' <<<"$gar_out" && grep -q 'Профили: 27b-single 27b-multi flash-multi' <<<"$gar_out" \
   && ok "garbage → rc=1 + список + Профили" || bad "garbage → rc=1 + список + Профили (rc=$rc)"
@@ -219,14 +259,16 @@ rc=$(rc_out ./gfctl --help | head -n 1)
 rc=$(rc_out ./gfctl install --profile bogus | head -n 1); o=$(rc_out ./gfctl install --profile bogus | tail -n +2)
 [ "$rc" = 1 ] && ! grep -q 'появится в сабстэдже' <<<"$o" \
   && ok "install — живая команда (die по грамматике, не заглушка)" || bad "install не-заглушка (rc=$rc)"
-for c in watch cache agent-check; do
-  out=$(rc_out ./gfctl "$c"); rc=${out%%$'\n'*}
-  if [ "$rc" = 1 ] && grep -q 'этап' <<<"$out"; then ok "заглушка этапа 3: $c → rc=1 «этап»"; else bad "заглушка $c (rc=$rc)"; fi
-done
-for c in use logs on off up down uninstall smoke bench; do
+for c in use logs on off up down uninstall smoke bench watch cache agent-check; do
   set +e; out=$(PATH="$FAUX:$PATH" GFCTL_DIR="$TMP/noact" HOME="$TMP/noact-home" \
-    GFCTL_RECREATE_PAUSE_S=0 GFCTL_RUN_ATTEMPTS=1 GFCTL_HEALTH_POLL=300 timeout 30 ./gfctl "$c" </dev/null 2>&1); prc=$?; set -e
-  if [ "$prc" -lt 124 ] && ! grep -q 'появится в сабстэдже' <<<"$out"; then ok "не-заглушка: $c"; else bad "$c остался заглушкой (rc=$prc)"; fi
+    GFCTL_WATCH_TICKS=1 GFCTL_RECREATE_PAUSE_S=0 GFCTL_RUN_ATTEMPTS=1 GFCTL_HEALTH_POLL=300 \
+    timeout 30 ./gfctl "$c" </dev/null 2>&1); prc=$?; set -e
+  if [ "$prc" -lt 124 ] && ! grep -q 'появится в сабстэдже' <<<"$out" && ! grep -q 'этап 3' <<<"$out"; then
+    ok "не-заглушка: $c"; else bad "$c остался заглушкой (rc=$prc)"; fi
+done
+for a in "watch --interval abc" "watch --interval 0" "watch bogus" "cache extra" "cache --verify extra"; do
+  set +e; ./gfctl $a >/dev/null 2>&1; g_rc=$?; set -e
+  [ "$g_rc" = 1 ] && ok "грамматика: gfctl $a → die rc 1" || bad "грамматика $a (rc=$g_rc)"
 done
 
 echo "== 3. фикстуры: регенерация байт-в-байт с ассетами tests/fixtures"
@@ -1010,6 +1052,231 @@ set +e; out=$(GFCTL_FAUX_INSPECT=running GFCTL_PORT=8099 GFCTL_FAUX_PODMAN_LOGS=
   || bad "bench FAILALL (rc=$b4_rc, curl=$(cat "$FAUXCNT.curl"))"
 kill "$BLID" 2>/dev/null || true
 wait "$BLID" 2>/dev/null || true
+
+# ══ 3.1: agent-check + cache + watch ═════════════════════════════════════════
+# Тайминги НЕ ассертятся (машино-зависимы) — только вердикт-строки,
+# структура CHECK-строк и счётчики вызовов (Test strategy 3.1).
+
+echo "== 33. cmp_ref (чистая функция) + ref_get (референсы per профиль)"
+cr=$(gf 'cmp_ref "сессия 15 ходов" 20 23.8')
+[ "$cr" = "PASS: сессия 15 ходов 20.0s (референс 23.8s)" ] \
+  && ok "cmp_ref: 20 ≤ 23.8×1.25 → PASS" || bad "cmp_ref PASS (got: $cr)"
+cr=$(gf 'cmp_ref "сессия" 28 23.8')
+[ "$cr" = "PASS: сессия 28.0s (референс 23.8s)" ] \
+  && ok "cmp_ref: 28 ≤ 29.75 (граница ±25%) → PASS" || bad "cmp_ref граница (got: $cr)"
+cr=$(gf 'cmp_ref "сессия" 30 23.8')
+[ "$cr" = "WARN: сессия 30.0s — регрессия >25% к 23.8s" ] \
+  && ok "cmp_ref: 30 > 29.75 → WARN регрессия" || bad "cmp_ref WARN (got: $cr)"
+cr=$(gf 'cmp_ref "метка" 1.0 ""')
+[ "$cr" = "WARN: метка 1.0s — референс не снят (EXP-007)" ] \
+  && ok "cmp_ref: ref='' → WARN «не снят»" || bad "cmp_ref не снят (got: $cr)"
+cr=$(gf 'cmp_ref "follow-up 25k" 30 1.7 "проверь --cache-ram-bytes/--cache-disk"')
+[[ "$cr" == *"(проверь --cache-ram-bytes/--cache-disk)" ]] \
+  && ok "cmp_ref: подсказка причины — хвост WARN-строки" || bad "cmp_ref hint (got: $cr)"
+cr=$(gf 'cmp_ref "метка" 20 23.8 "hint"')
+[[ "$cr" == PASS* ]] && [[ "$cr" != *hint* ]] \
+  && ok "cmp_ref: подсказка только у WARN-регрессии" || bad "cmp_ref hint у PASS (got: $cr)"
+[ "$(gf 'ref_get 27b-single session')" = "23.8" ] \
+  && [ "$(gf 'ref_get 27b-single followup')" = "1.7" ] \
+  && [ "$(gf 'ref_get 27b-single restore')" = "0.81" ] \
+  && ok "ref_get 27b-single: session=23.8 followup=1.7 restore=0.81 (AGENT-CONFIGS п.3)" || bad "ref_get 27b-single"
+[ -z "$(gf 'ref_get flash-multi session')" ] && [ -z "$(gf 'ref_get 27b-multi session')" ] \
+  && [ -z "$(gf 'ref_get 27b-multi followup')" ] \
+  && ok "ref_get мульти-профили: '' (не сняты — до EXP-007 WARN)" || bad "ref_get мульти"
+[ -z "$(gf 'ref_get 27b-single docq')" ] && [ -z "$(gf 'ref_get flash-multi docq')" ] \
+  && ok "ref_get docq: '' у всех профилей (вне gufo — до EXP-007)" || bad "ref_get docq"
+
+echo "== 34. agent-check happy (faux): ровно 25 chat-POST, 4 CHECK-строки, сводка rc 0, порядок warn→rm"
+gf 'write_canon 27b-single 1 262144' >/dev/null 2>&1   # референсы 27b-single в cmp_ref
+: > "$FAUXLOG"; rm -f "$FAUXCNT.curl"
+set +e
+out=$(GFCTL_FAUX_INSPECT=running GFCTL_FAUX_PODMAN_LOGS="$LOGOK" \
+  GFCTL_FAUX_CURL_TIMINGS=1 GFCTL_FAUX_CURL_REUSE=live \
+  gf 'port_open(){ return 0; }
+warn(){ printf "WARN: %s\n" "$*" >> "$GFCTL_FAUX_LOG"; printf "WARN: %s\n" "$*" >&2; }
+cmd_agentcheck' 2>&1); ac_rc=$?; set -e
+[ "$ac_rc" = 0 ] && grep -q '^AGENT-CHECK: PASS=3 WARN=1 FAIL=0$' <<<"$out" \
+  && ok "agent-check: rc 0, сводка PASS=3 WARN=1 FAIL=0 (docq → WARN «не снят»)" \
+  || { bad "agent-check happy (rc=$ac_rc)"; tail -12 <<<"$out"; }
+[ "$(grep -c '^CHECK ' <<<"$out")" = 4 ] \
+  && ok "agent-check: ровно 4 CHECK-строки (session/followup/docq/restore)" || bad "CHECK-строки: $(grep -c '^CHECK ' <<<"$out")"
+[ "$(grep -c '/v1/chat/completions' "$FAUXLOG")" = 25 ] \
+  && ok "agent-check: ровно 25 chat-POST (15+6+2+2)" || bad "chat-POST: $(grep -c '/v1/chat/completions' "$FAUXLOG")"
+grep -q 'PASS: сессия 15 ходов' <<<"$out" && grep -q 'PASS: follow-up 25k' <<<"$out" \
+  && grep -qE 'WARN: \[док 25k\] q2 [0-9.]+s — референс не снят' <<<"$out" \
+  && grep -q 'PASS: рестарт-restore' <<<"$out" \
+  && ok "вердики: сессия/follow-up/restore PASS, docq WARN «не снят»" || bad "вердики cmp_ref"
+grep -q 'follow-up 5k' <<<"$out" && grep -q 'follow-up 100k' <<<"$out" \
+  && ok "5k/100k напечатаны без сравнения" || bad "5k/100k строки"
+grep -q 'restore: reuse=live — disk-restore работает' <<<"$out" \
+  && ok "reuse=live → ok-строка restore (не FAIL)" || bad "reuse ok-строка"
+i_warn=$(grep -n 'WARN: agent-check: рестарт-restore' "$FAUXLOG" | head -n1 | cut -d: -f1)
+i_rm=$(grep -n '^podman rm' "$FAUXLOG" | head -n1 | cut -d: -f1)
+mapfile -t achat < <(grep -n '/v1/chat/completions' "$FAUXLOG" | cut -d: -f1)
+if [ -n "$i_warn" ] && [ -n "$i_rm" ] && [ "${#achat[@]}" = 25 ] \
+   && [ "$i_warn" -lt "$i_rm" ] && [ "${achat[23]}" -lt "$i_rm" ] && [ "$i_rm" -lt "${achat[24]}" ]; then
+  ok "порядок: warn-рестарт и 24 POST ДО podman rm; 25-й POST (restore) после rm"
+else
+  bad "порядок warn/rm/POST: warn=$i_warn rm=$i_rm chat24=${achat[23]:-?} chat25=${achat[24]:-?}"
+fi
+[ "$(grep -c '^podman run -d' "$FAUXLOG")" = 1 ] \
+  && ok "рестарт: ровно один container_up (канон, без дублей)" || bad "podman run в agent-check"
+[ -e "$TMP/stack/logs/agent-check-restore.json" ] \
+  && bad "state-файл restore НЕ удалён после использования" || ok "state-файл restore удалён после использования"
+[ "$(grep -c '/metrics' "$FAUXLOG")" = 0 ] \
+  && ok "agent-check: /metrics не дёргается (тайминги из тела ответа)" || bad "agent-check трогает /metrics"
+
+echo "== 34a. agent-check структурный FAIL: транспорт и timings-нет → rc 1 ДО сводки"
+: > "$FAUXLOG"; rm -f "$FAUXCNT.curl"
+set +e
+out=$(GFCTL_FAUX_INSPECT=running GFCTL_FAUX_PODMAN_LOGS="$LOGOK" GFCTL_FAUX_CURL_FAILALL=1 \
+  gf 'port_open(){ return 0; }
+cmd_agentcheck' 2>&1); ac2_rc=$?; set -e
+[ "$ac2_rc" = 1 ] && ! grep -q 'AGENT-CHECK:' <<<"$out" && grep -q 'stage1 структурно не прошёл' <<<"$out" \
+  && ok "curl FAILALL → die rc 1 до сводки (структурный провал)" || bad "agent-check FAILALL (rc=$ac2_rc)"
+: > "$FAUXLOG"; rm -f "$FAUXCNT.curl"
+set +e
+out=$(GFCTL_FAUX_INSPECT=running GFCTL_FAUX_PODMAN_LOGS="$LOGOK" \
+  gf 'port_open(){ return 0; }
+cmd_agentcheck' 2>&1); ac3_rc=$?; set -e
+[ "$ac3_rc" = 1 ] && ! grep -q 'AGENT-CHECK:' <<<"$out" && grep -q 'timings отсутствует' <<<"$out" \
+  && ok "timings нет в ответе (faux без TIMINGS) → rc 1 с явной причиной" || bad "agent-check timings-нет (rc=$ac3_rc)"
+set +e
+out=$(GFCTL_FAUX_INSPECT=missing gf 'cmd_agentcheck' 2>&1); ac4_rc=$?; set -e
+[ "$ac4_rc" = 1 ] && grep -q 'не запущен' <<<"$out" \
+  && ok "agent-check: контейнер не running → die rc 1 (гейт)" || bad "agent-check гейт (rc=$ac4_rc)"
+
+echo "== 35. cache: parse_configured (последняя configured побеждает) + сводка + /metrics best-effort"
+LOGCACHE="$TMP/logcache"
+printf 'boot noise\n' > "$LOGCACHE"
+printf '[cache] schema=component-cache-v1 event=configured sessions=1 snapshot_entries=128 capacity_bytes=4294967296 staging_capacity_bytes=1048576 automatic_bytes=15904702464 max_bytes=27512025088 disk_capacity_bytes=68719476736 slot_pinned_bytes=0 ram_cache=on disk_backing_bytes=0\n' >> "$LOGCACHE"
+printf 'event=skipped reason=full\n\nevent=evicted n=1\n\nevent=skipped reason=busy\n' >> "$LOGCACHE"
+printf '[cache] schema=component-cache-v1 event=configured sessions=2 capacity_bytes=8589934592 automatic_bytes=10737418240 disk_capacity_bytes=34359738368 ram_cache=off disk_backing_bytes=0\n' >> "$LOGCACHE"
+pc=$(gf "parse_configured < '$LOGCACHE'
+printf '[%s|%s|%s|%s|%s]' \"\$CC_SESSIONS\" \"\$CC_CAPACITY\" \"\$CC_DISK\" \"\$CC_RAMCACHE\" \"\$CC_AUTOMATIC\"")
+[ "$pc" = "[2|8589934592|34359738368|off|10737418240]" ] \
+  && ok "parse_configured: ПОСЛЕДНЯЯ configured побеждает (все 5 полей, capacity не ловит disk_)" || bad "parse_configured: '$pc'"
+pc=$(gf 'parse_configured < <(printf "nothing here\n"); printf "[%s|%s]" "${CC_CAPACITY:-}" "${CC_DISK:-}"')
+[ "$pc" = "[|]" ] && ok "parse_configured: нет configured → пустые глобалы, rc 0 (норма)" || bad "parse_configured пусто: '$pc'"
+gf 'write_canon 27b-single 1 262144' >/dev/null 2>&1
+: > "$FAUXLOG"
+set +e
+out=$(GFCTL_FAUX_INSPECT=running GFCTL_FAUX_PODMAN_LOGS="$LOGCACHE" \
+  gf 'port_open(){ return 0; }
+cmd_cache' 2>&1); c_rc=$?; set -e
+[ "$c_rc" = 0 ] && ok "cache сводка: rc 0 (как doctor)" || bad "cache rc=$c_rc"
+grep -q '^каталог: .*cache/27b-single (' <<<"$out" \
+  && ok "cache: каталог профиля + du -sb" || bad "cache каталог: $(grep 'каталог' <<<"$out")"
+grep -q '^configured: sessions 2 | ram-cache off | capacity 8.0 GiB | automatic 10.0 GiB | disk 32.0 GiB$' <<<"$out" \
+  && ok "cache: строка configured в GiB из фикстуры" || bad "cache configured: $(grep configured: <<<"$out")"
+grep -q '^счётчики: skipped 2 | evicted 1 ' <<<"$out" \
+  && ok "cache: skipped/evicted — count-only вхождения" || bad "cache счётчики: $(grep счётчики <<<"$out")"
+grep -q '^/metrics llamacpp:prompt_tokens_cached_total: 539 (best-effort)$' <<<"$out" \
+  && ok "cache: /metrics cached_total через faux curl" || bad "cache metrics: $(grep metrics <<<"$out")"
+set +e
+out=$(GFCTL_FAUX_INSPECT=running GFCTL_FAUX_PODMAN_LOGS="$LOGCACHE" GFCTL_FAUX_CURL_FAILALL=1 \
+  gf 'port_open(){ return 0; }
+cmd_cache' 2>&1); c2_rc=$?; set -e
+[ "$c2_rc" = 0 ] && grep -q 'cached_total: ? (best-effort)' <<<"$out" \
+  && ok "cache: /metrics отказ → «?», rc 0 (не-фатально)" || bad "cache metrics отказ (rc=$c2_rc)"
+set +e
+out=$(GFCTL_FAUX_INSPECT=running GFCTL_FAUX_PODMAN_LOGS="$LOGNONE" \
+  gf 'port_open(){ return 0; }
+cmd_cache' 2>&1); c3_rc=$?; set -e
+[ "$c3_rc" = 0 ] && grep -q 'строки event=configured в логе нет' <<<"$out" \
+  && ok "cache: нет configured-строки → «не настроен», rc 0 (норма)" || bad "cache без configured (rc=$c3_rc)"
+
+echo "== 36. cache --verify: follow-up reuse=live → PASS; warn→rm порядок; restore reuse=disk → PASS; none → rc 1; tmpfs-детект"
+: > "$FAUXLOG"; rm -f "$FAUXCNT.curl"
+set +e
+out=$(GFCTL_FAUX_INSPECT=running GFCTL_FAUX_PODMAN_LOGS="$LOGOK" \
+  GFCTL_FAUX_CURL_TIMINGS=1 GFCTL_FAUX_CURL_REUSE=live \
+  gf 'port_open(){ return 0; }
+warn(){ printf "WARN: %s\n" "$*" >> "$GFCTL_FAUX_LOG"; printf "WARN: %s\n" "$*" >&2; }
+cmd_cache --verify' 2>&1); cv_rc=$?; set -e
+[ "$cv_rc" = 0 ] && grep -q 'PASS: follow-up переиспользовал кэш (reuse=live)' <<<"$out" \
+  && grep -q 'PASS: disk-restore работает' <<<"$out" \
+  && ok "cache --verify live/disk: rc 0 + оба PASS" || { bad "cache verify live (rc=$cv_rc)"; tail -10 <<<"$out"; }
+[ "$(grep -c '/v1/chat/completions' "$FAUXLOG")" = 3 ] \
+  && ok "cache --verify: ровно 3 chat-POST (2 follow-up + 1 restore)" || bad "verify POST: $(grep -c '/v1/chat/completions' "$FAUXLOG")"
+i_wr=$(grep -n 'WARN: cache --verify: рестарт' "$FAUXLOG" | head -n1 | cut -d: -f1)
+i_rm=$(grep -n '^podman rm' "$FAUXLOG" | head -n1 | cut -d: -f1)
+mapfile -t cchat < <(grep -n '/v1/chat/completions' "$FAUXLOG" | cut -d: -f1)
+if [ -n "$i_wr" ] && [ -n "$i_rm" ] && [ "${#cchat[@]}" = 3 ] \
+   && [ "${cchat[1]}" -lt "$i_wr" ] && [ "$i_wr" -lt "$i_rm" ] && [ "$i_rm" -lt "${cchat[2]}" ]; then
+  ok "порядок: 2 POST follow-up < warn-рестарт < podman rm < restore-POST"
+else
+  bad "порядок verify: warn=$i_wr rm=$i_rm chat2=${cchat[1]:-?} chat3=${cchat[2]:-?}"
+fi
+[ -e "$TMP/stack/logs/cache-verify.json" ] \
+  && bad "state cache-verify.json НЕ удалён" || ok "state cache-verify.json удалён после использования"
+: > "$FAUXLOG"; rm -f "$FAUXCNT.curl"
+set +e
+out=$(GFCTL_FAUX_INSPECT=running GFCTL_FAUX_PODMAN_LOGS="$LOGOK" \
+  GFCTL_FAUX_CURL_TIMINGS=1 GFCTL_FAUX_CURL_REUSE=none \
+  gf 'port_open(){ return 0; }
+cmd_cache --verify' 2>&1); cv2_rc=$?; set -e
+[ "$cv2_rc" = 1 ] && grep -q 'follow-up не переиспользовал кэш (reuse=none)' <<<"$out" \
+  && grep -q -- '--cache-ram-bytes' <<<"$out" \
+  && ok "cache --verify reuse=none → die rc 1 с подсказкой --cache-ram-bytes" || bad "verify none (rc=$cv2_rc)"
+[ "$(grep -c '^podman rm' "$FAUXLOG")" = 0 ] \
+  && ok "reuse=none: die ДО рестарта (podman rm не вызывался)" || bad "verify none дошёл до рестарта"
+: > "$FAUXLOG"; rm -f "$FAUXCNT.curl"
+set +e
+out=$(GFCTL_FAUX_INSPECT=running GFCTL_FAUX_PODMAN_LOGS="$LOGOK" GFCTL_FAUX_STAT_FSTYPE=tmpfs \
+  GFCTL_FAUX_CURL_TIMINGS=1 GFCTL_FAUX_CURL_REUSE=disk \
+  gf 'port_open(){ return 0; }
+cmd_cache --verify' 2>&1); cv3_rc=$?; set -e
+[ "$cv3_rc" = 0 ] && grep -q 'WARN: кэш-каталог .* на tmpfs — disk-тир переживает только до ребута' <<<"$out" \
+  && ok "tmpfs-детект: faux stat tmpfs → WARN, rc 0 (DoD PLAN)" || bad "tmpfs WARN (rc=$cv3_rc)"
+: > "$FAUXLOG"; rm -f "$FAUXCNT.curl"
+set +e
+out=$(GFCTL_FAUX_INSPECT=running GFCTL_FAUX_PODMAN_LOGS="$LOGOK" GFCTL_FAUX_STAT_FSTYPE=ext4 \
+  GFCTL_FAUX_CURL_TIMINGS=1 GFCTL_FAUX_CURL_REUSE=disk \
+  gf 'port_open(){ return 0; }
+cmd_cache --verify' 2>&1); cv4_rc=$?; set -e
+[ "$cv4_rc" = 0 ] && ! grep -q 'tmpfs' <<<"$out" \
+  && ok "негатив: faux stat ext4 → tmpfs-WARN нет" || bad "ext4 нет-WARN (rc=$cv4_rc)"
+
+echo "== 37. watch: не-TTY стрим (1 тик), мёртвый сервер 3×«недоступен» без спама, selfcheck, через gfctl"
+: > "$FAUXLOG"; rm -f "$FAUXCNT.curl"
+set +e
+out=$(GFCTL_FAUX_PODMAN_LOGS="$LOGSP" GFCTL_FAUX_LOG="$FAUXLOG" GFCTL_FAUX_CNT="$FAUXCNT" \
+  GFCTL_WATCH_PORT=8080 GFCTL_WATCH_INTERVAL=0.01 GFCTL_WATCH_TICKS=1 \
+  PATH="$FAUX:$PATH" GFCTL_RECREATE_PAUSE_S=0 GFCTL_HEALTH_POLL=1 GFCTL_SMOKE_RETRY_S=0 \
+  python3 tpl/python/watch_tui.py 2>&1); w_rc=$?; set -e
+[ "$w_rc" = 0 ] && ok "watch plain: rc 0 после 1 тика (GFCTL_WATCH_TICKS)" || bad "watch tick rc=$w_rc"
+grep -q ' \[движок\] model: Qwen3.8 Flash Next | uptime: ? | cached_total: 539$' <<<"$out" \
+  && ok "watch: блок «Движок» — модель с пробелами из сида + cached_total" || bad "watch движок: $(grep движок <<<"$out")"
+grep -q ' \[скорость\] llamacpp:prompt_tokens_cached_total=539$' <<<"$out" \
+  && ok "watch: блок «Скорость» — сырые llamacpp:* ключи" || bad "watch скорость: $(grep скорость <<<"$out")"
+grep -qE ' \[память\] RAM: [0-9]+(\.[0-9])?/[0-9]+(\.[0-9])? GiB \| temp: ' <<<"$out" \
+  && ok "watch: блок «Память» — /proc/meminfo + hwmon-temp" || bad "watch память: $(grep память <<<"$out")"
+[ "$(cat "$FAUXCNT.curl" 2>/dev/null || echo 0)" = 1 ] \
+  && ok "watch: счётчик /metrics-вызовов = тикам (1)" || bad "watch metrics calls=$(cat "$FAUXCNT.curl" 2>/dev/null || echo 0)"
+[ "$(grep -c '^podman logs -t --tail 50' <<<"$(cat "$FAUXLOG")")" = 1 ] \
+  && ok "watch plain: сид логов один (uptime/model)" || bad "watch seed: $(grep -c 'podman logs' "$FAUXLOG")"
+: > "$FAUXLOG"; rm -f "$FAUXCNT.curl"
+set +e
+out=$(GFCTL_FAUX_PODMAN_LOGS="$LOGSP" GFCTL_FAUX_LOG="$FAUXLOG" GFCTL_FAUX_CNT="$FAUXCNT" \
+  GFCTL_FAUX_CURL_FAILALL=1 \
+  GFCTL_WATCH_PORT=8080 GFCTL_WATCH_INTERVAL=0.01 GFCTL_WATCH_TICKS=3 \
+  PATH="$FAUX:$PATH" python3 tpl/python/watch_tui.py 2>&1); wd_rc=$?; set -e
+[ "$wd_rc" = 0 ] && [ "$(grep -c 'недоступен' <<<"$out")" = 3 ] \
+  && ok "мёртвый сервер: ровно 3 строки «недоступен» (одна на тик), rc 0" || bad "dead lines=$(grep -c 'недоступен' <<<"$out") rc=$wd_rc"
+[ "$(cat "$FAUXCNT.curl" 2>/dev/null || echo 0)" = 3 ] \
+  && ok "мёртвый сервер: /metrics-вызовов = тикам (3)" || bad "dead metrics calls"
+! grep -qi 'traceback' <<<"$out" \
+  && ok "мёртвый сервер: без traceback-спама" || bad "traceback в выводе watch"
+set +e
+out=$(GFCTL_WATCH_SELFCHECK=1 python3 tpl/python/watch_tui.py 2>&1); sc_rc=$?; set -e
+[ "$sc_rc" = 0 ] && grep -q 'selfcheck: 24/24 ok' <<<"$out" \
+  && ok "watch selfcheck: 24/24 (парсер/рендер-скелет без curses)" || bad "selfcheck rc=$sc_rc: $out"
+: > "$FAUXLOG"
+set +e
+out=$(GFCTL_WATCH_TICKS=1 GFCTL_FAUX_PODMAN_LOGS="$LOGSP" frun watch 2>&1); fw_rc=$?; set -e
+[ "$fw_rc" = 0 ] && grep -q 'движок' <<<"$out" \
+  && ok "gfctl watch через диспетчер: exec python → стрим → rc 0" || bad "gfctl watch (rc=$fw_rc)"
 
 printf 'ИТОГО: PASS=%s FAIL=%s\n' "$PASS" "$FAIL"
 [ "$FAIL" = 0 ]
