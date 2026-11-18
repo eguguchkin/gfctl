@@ -103,11 +103,14 @@ container_stop() {
 #   _watchdog/_boot; SPEC §8 «recreate = rm+run»: конфиг контейнера не
 #   переиспользуется никогда — заодно иммунно к перенумерации renderD*
 #   между ребутами, поэтому hfctl-деление boot/recreate не нужно):
-#   1) podman rm -f (вывод заглушён, || true);
-#   2) mkdir -p cache/<профиль>; пауза GFCTL_RECREATE_PAUSE_S (дефолт 3 с,
+#   1) mkdir -p cache/<профиль>; пауза GFCTL_RECREATE_PAUSE_S (дефолт 3 с,
 #      F10: rootless podman медленно освобождает порт);
-#   3) до GFCTL_RUN_ATTEMPTS попыток `podman run -d …` (F9-флаги ровно,
-#      -p bind:port:port по канону, маунты: каталог-сет → /models:ro
+#   2) до GFCTL_RUN_ATTEMPTS попыток `podman rm -f` + `podman run -d …`
+#      (rm ВНУТРИ цикла, ПЕРЕД каждым run — единственный rm: каждая попытка
+#      — чистый слейт, иначе run попыток 2/3 бил в «container already in
+#      use» — teardown loading-контейнера медленнее пауз; EXP-009
+#      evo-повтер, рестарт-restore; F9-флаги ровно, -p bind:port:port
+#      по канону, маунты: каталог-сет → /models:ro
 #      (контейнерные пути весов = /models/<файл>, как задуманы токены
 #      profiles.sh) и cache/<профиль> → /cache; хвост — serve_args из
 #      канона); успех → выход; неудача → пауза 5 с и повтор (занятый порт
@@ -128,7 +131,6 @@ container_stop() {
 # @returns integer          # 0 — контейнер запущен; die при исчерпании попыток
 container_up() {
   local prof="$1" set_name cache_dir attempt attempts="${GFCTL_RUN_ATTEMPTS:-3}" args
-  podman rm -f "$CONTAINER" >/dev/null 2>&1 || true
   set_name=$(profile_field "$prof" 1) || die "container_up: неизвестный профиль '$prof'"
   cache_dir="$STACK_DIR/cache/$prof"
   mkdir -p "$cache_dir"
@@ -136,6 +138,9 @@ container_up() {
   args=$(serve_args "$prof" "$(canon_sessions "$prof")" "$(canon_context "$prof")")
   for attempt in $(seq 1 "$attempts"); do
     log "podman run (попытка $attempt/$attempts): профиль $prof"
+    # каждая попытка — чистый слейт: teardown loading-контейнера медленнее
+    # пауз, без этого run 2/3 бил в «container already in use» (EXP-009 evo-повтер)
+    podman rm -f "$CONTAINER" >/dev/null 2>&1 || true
     # shellcheck disable=SC2086 — serve_args отдаёт ровно одну строку аргументов
     if podman run -d --name "$CONTAINER" \
       --device /dev/kfd --device /dev/dri --group-add keep-groups \

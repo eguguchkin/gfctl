@@ -850,6 +850,12 @@ echo "== 21. recreate-ретрай (F10): run падает 1 раз → 2 выз
 set +e; out=$(GFCTL_FAUX_RUNFAIL=1 gf 'container_up 27b-single' 2>&1); r1_rc=$?; set -e
 [ "$r1_rc" = 0 ] && [ "$(grep -c '^podman run -d' "$FAUXLOG")" = 2 ] \
   && ok "ретрай: 1-й run упал → ровно 2 вызова run, rc 0" || bad "ретрай 1 (rc=$r1_rc, run=$(grep -c '^podman run -d' "$FAUXLOG"))"
+# fix-r2 («already in use» ×3, evo-повтер EXP-009): rm ВНУТРИ цикла попыток —
+# вторая попытка обязана начинаться с rm (последовательность rm→run→rm→run)
+seq_rm="$(grep -E '^podman (rm -f gufo|run -d --name gufo)' "$FAUXLOG" | cut -d' ' -f2 | tr '\n' ' ')"
+[ "$seq_rm" = "rm run rm run " ] \
+  && ok "ретрай: каждая попытка начинается с rm (rm→run→rm→run — чистый слейт)" \
+  || bad "ретрай rm-в-цикле: последовательность '$seq_rm'"
 : > "$FAUXLOG"; rm -f "$FAUXCNT"
 set +e; out=$(GFCTL_FAUX_RUNFAIL=99 GFCTL_RUN_ATTEMPTS=3 gf 'container_up 27b-single' 2>&1); r2_rc=$?; set -e
 [ "$r2_rc" = 1 ] && [ "$(grep -c '^podman run -d' "$FAUXLOG")" = 3 ] \
