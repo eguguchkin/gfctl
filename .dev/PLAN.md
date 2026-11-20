@@ -118,9 +118,18 @@
    (evo: hfctl 27b-single healthy; FAEX: hfctl flash-multi healthy).
 
 ### DoD
-- [ ] Полный цикл с нуля на обеих машинах (EXP-логи в llm-lab external/).
-- [ ] Ребут: gfctl-сервер сам healthy; hfctl-прод после `hfctl on` —
-      healthy, smoke OK.
-- [ ] README.md (quickstart), AGENTS.md актуальны, git чистый.
-- [ ] Бэклог-хвосты в STATE.md: `--with-vision` (mmproj), 8–16 потоков
+- [x] Полный цикл с нуля на обеих машинах (EXP-логи в llm-lab external/).
+      FAEX: EXP-008 PASS (GitHub-клон 2cbb544, agent-check 4/4, реф. EXP-007).
+      evo: повтор ПРОЙДЕН (2026-11-19, 27b-single: install→use→agent-check 3 PASS
+      (сессия 19.9s vs реф 30.4); рестарт-restore — контингент rm, дефект юнит-Environment
+      закрыт кодом bc991f1 + принят живым ребутом).
+- [x] Ребут: gfctl-сервер сам healthy; hfctl-прод после `hfctl on` —
+      healthy, smoke OK. FAEX: юнит active на первом срезе после ребута, health 200
+      ~70 с, journal чист. evo: юнит active, gufo поднят юнитом, health 200.
+- [x] README.md (quickstart), AGENTS.md актуальны, git чистый.
+- [x] Бэклог-хвосты в STATE.md: `--with-vision` (mmproj), 8–16 потоков
       (CONC-зона gufo), COMPOSABLE-аналог, авто-переход 27b-multi↔single.
+      (+ defect serve-юнит-Environment ЗАКРЫТ живым ребутом; 4.3 minor-polish ЗАКРЫТ;
+      EXP-010/011 probes — хвостовые, при будущих окнах.)
+
+**ЭТАП 4: ЗАКРЫТ (2026-11-20). Пуш: пользователем (origin = 566bd4d).**
