@@ -243,7 +243,7 @@ cmd_doctor() {
                gfctl-acc gfctl-acc-src gfctl-acc-models; do
       if [ -e "$home/$art" ]; then echo "  ~/$art: обнаружен"; else echo "  ~/$art: не обнаружен"; fi
     done
-    echo "  примечание: uninstall НЕ трогает никогда: ~/gufo-models ~/gufo-exp ~/halogen-models ~/halogen-cache; приёмочные ~/gfctl-acc{,-src} удаляет, ~/gfctl-acc-models — только с --purge-models"
+    echo "  примечание: uninstall (v2, 4.4) не трогает НИКАКИЕ данные: дерево клона с .data/ и podman-образ остаются; полный снос — руками (rm -rf клона + podman rmi)"
   fi
   return 0
 }
@@ -256,7 +256,7 @@ cmd_doctor() {
 #   пуст → «загружается»; autostart = `systemctl --user is-enabled
 #   gfctl-serve.service` (enabled → вкл/true, иначе выкл/false; systemctl
 #   нет → «?»/null); version = `podman inspect -f {{.ImageName}}` (нет
-#   контейнера → null); cache = $STACK_DIR/cache/<профиль> + `du -sb`
+#   контейнера → null); cache = $STACK_DIR/.data/cache/<профиль> + `du -sb`
 #   (нет → null). JSON: ключи/типы 1.1 НЕ меняются (route/autostart/version
 #   были null — теперь заполняются живыми значениями), новый ключ `cache`
 #   добавлен В КОНЕЦ. Человекострока — одна строка:
@@ -291,7 +291,7 @@ cmd_status() {
   read -r present total _ <<<"$stats"
   port=$(canon_port); bind=$(canon_bind)
   cache_j="null"; cache_line="—"; cache_b=""
-  cache_dir="$STACK_DIR/cache/$prof"
+  cache_dir="$STACK_DIR/.data/cache/$prof"
   if port_open "$port"; then
     ROUTE_SPEC=""; ROUTE_SESSIONS=""; ROUTE_CTX=""; ROUTE_MODEL=""
     if command -v podman >/dev/null 2>&1; then
@@ -599,12 +599,12 @@ probe_context() {
       # ВАЖНО (F21, переписано): УРЕЗАНИЙ движок НЕ делает — проверена вся
       # цепочка gufo (serve → runner): только валидация с явным отказом,
       # load_completed печатает ровно заказанное; наблюдённое расхождение
-      # (196608 → 163840) — СТАРЫЙ код диспетчера на машине (EXP-006 без
-      # bootstrap install.sh), не движок. факт > заказ невозможен, но
+      # (196608 → 163840) — СТАРЫЙ код диспетчера на машине (EXP-006, окно
+      # до лейаута 4.4), не движок. факт > заказ невозможен, но
       # принимается так же (ветка симметрична).
       if [ -n "$ROUTE_CTX" ] && [ "$ROUTE_CTX" != "$step" ]; then
         probe_log "ступень $step: движок поднял фактический $ROUTE_CTX — принимаю факт"
-        warn "probe: заказан контекст $step, сервер поднялся на $ROUTE_CTX — расхождение заказа с фактом; движок урезаний НЕ делает (F21: только валидация с явным отказом) — типичная причина: на машине старый код диспетчера, обнови дерево (./install.sh); канон $ROUTE_CTX, большие ступени лестницы не продолжаю"
+        warn "probe: заказан контекст $step, сервер поднялся на $ROUTE_CTX — расхождение заказа с фактом; движок урезаний НЕ делает (F21: только валидация с явным отказом) — типичная причина: на машине старый код диспетчера, обнови дерево (git pull клона); канон $ROUTE_CTX, большие ступени лестницы не продолжаю"
         PROBE_CTX="$ROUTE_CTX"
         return 0
       fi
@@ -644,7 +644,10 @@ probe_context() {
 #   первая загрузившаяся ступень; при расхождении заказа с фактом канон =
 #   фактический ROUTE_CTX — страховка 2.1-F4, урезаний движок не делает,
 #   F21). Затем write_canon (ОБА представления:
-#   активные поля + пара-ключ) → контейнер: probe-путь УЖЕ поднят попыткой
+#   активные поля + пара-ключ) → install_units (лейаут 4.4: юниты ставятся
+#   при первом use — ПОСЛЕ записи канона, до него поднимать нечего;
+#   идемпотентный рендер; enable/linger — только on/install) → контейнер:
+#   probe-путь УЖЕ поднят попыткой
 #   (env-оверрайд дал байт-в-байт ту же serve-строку) → wait_health сразу,
 #   БЕЗ второго recreate (экономия до 94 с загрузки, F5); остальные пути —
 #   container_up → wait_health 180 → smoke (порядок 1.2) → печать канона.
@@ -652,11 +655,12 @@ probe_context() {
 # Побочные эффекты: веса (после ask при недостающих), .env канона
 #   (перезапись + пар-блок), журнал попыток logs/probe-<профиль>-<sessions>.log
 #   (probe-путь), каталог кэша целевого профиля, контейнер (recreate на
-#   не-probe путях).
+#   не-probe путях), юнит-файлы в $UNIT_DIR (install_units, идемпотентно).
 #
 # Ограничения/допущения: порядок recreate → health → smoke фиксированный
-#   (правило AGENTS); юниты НЕ перерендеряются (serve-строка собирается из
-#   канона в момент container_up/boot); повторный use с каноном пары =
+#   (правило AGENTS); юниты перерендеряются идемпотентно (4.4: ставятся при
+#   каждом use после канона; enable не трогается), serve-строка собирается
+#   из канона в момент container_up/boot; повторный use с каноном пары =
 #   ровно ОДНА загрузка (container_up единственный, пере-перебора нет);
 #   probe НЕ пишет канон между попытками — отказ всех ступеней оставляет
 #   прежний .env нетронутым; сбой health/smoke завершает процесс по set -e
@@ -717,6 +721,7 @@ cmd_use() {
     fi
   fi
   write_canon "$prof" "$eff_sessions" "$ctx"
+  install_units   # лейаут 4.4: юниты при первом use (после канона; идемпотентно)
   if [ "$probe_path" = 1 ]; then
     log "контейнер поднят probe-попыткой (env-оверрайд) — recreate не нужен, health сразу"
     wait_health 180
@@ -1023,7 +1028,7 @@ cmd_cache() {
   esac
   [ -n "${2:-}" ] && die "cache: лишние аргументы после '${1:-}' — доступно: --verify"
   local prof; prof=$(cur_profile)
-  local cache_dir="$STACK_DIR/cache/$prof" cache_b="" cache_gib=""
+  local cache_dir="$STACK_DIR/.data/cache/$prof" cache_b="" cache_gib=""
   echo "== gfctl cache — сводка кэша (профиль $prof)"
   if [ -d "$cache_dir" ]; then
     cache_b=$(du -sb "$cache_dir" 2>/dev/null | awk '{print $1}') || true
@@ -1087,80 +1092,47 @@ cmd_watch() {
   exec python3 "$TPL_DIR/python/watch_tui.py"
 }
 
-# Назначение: cmd uninstall [--purge-models] [--purge-image] — слоёная
-#   зачистка (SPEC §3; модели и образ по умолчанию ЖИВЫ): ask (не-TTY без
-#   GFCTL_YES → rc 1 — удаление данных только с согласия) → слои ПО ПОРЯДКУ:
-#   маркер+container_stop → disable+rm юнитов+daemon-reload → linger off
-#   (|| true на каждый systemd-шаг) → limits.d НЕ трогаем (4.1-F2: файл
-#   безвреден и переживает uninstall ради будущих relogin; снос возвращал
-#   memlock-цикл install) →
-#   дерево $STACK_DIR: всё КРОМЕ базы весов, если база внутри (find
-#   -mindepth/-maxdepth 1 ! -path); база вне — rm -rf стека целиком;
-#   приёмочные ~/gfctl-acc{,-src} (4.1 — всегда); --purge-models → rm -rf
-#   базы весов И ~/gfctl-acc-models; --purge-image → podman rmi || true.
-#   ГРАНИЦЫ (4.1): ~/gufo-models, ~/gufo-exp, ~/halogen-models,
-#   ~/halogen-cache — НИКОГДА (артефакты окон исследований); в конце
-#   печатается их список «остались нетронутыми». Итоговая сводка слоёв.
+# Назначение: cmd uninstall (v2, лейаут 4.4) — снять сервер, данные НЕ
+#   трогать (данные — инвариант; дерево стека = git-клон пользователя):
+#   ask (не-TTY без GFCTL_YES → rc 1 — снятие только с согласия) → слои ПО
+#   ПОРЯДКУ: маркер+container_stop → disable+rm юнитов (serve+watchdog+
+#   таймер)+daemon-reload → linger off → limits.d-файл (sudo rm — v2 снимает
+#   его; вернётся при следующем install/use из memlock-гейта) → итоговая
+#   сводка. Дерево $STACK_DIR (включая .data/ — модели/кэш/логи и канон
+#   .env) и podman-образ НЕ трогаются никогда: полный снос — руками
+#   (rm -rf клона + podman rmi). «Слоёный» снос дерева ~/gufo и приёмочных
+#   ~/gfctl-acc* упразднён (4.4).
 #
-# Побочные эффекты: контейнер удалён; юниты сняты; linger off; limits.d-
-#   файл НЕ тронут (4.1-F2, переживает uninstall ради будущих relogin);
-#   дерево стека удалено (кроме весов без флага);
-#   ~/gfctl-acc{,-src} удалены; по флагам — веса (+acc-models) и образ.
+# Побочные эффекты: маркер остановки; контейнер удалён (podman rm -f);
+#   юниты disabled и файлы удалены; linger off; limits.d-файл удалён
+#   (sudo). Файлы клона и podman-хранилище не меняются.
 #
 # Ограничения/допущения: требует container_stop (serve.sh); ask — тот же
 #   механизм согласия, что у весов (die при отказе/не-TTY); каждый
 #   systemd/sudo-шаг заглушен — uninstall доходит до конца даже на машине
-#   без работающего systemd; find -mindepth 1 — НЕ удалить сам $STACK_DIR
-#   вместе с моделями при базe внутри; $HOME не задан → acc-слои пропускаются
-#   (rm -rf с пустым корнем недопустим).
+#   без работающего systemd; аргументы НЕ предусмотрены (лишний → die:
+#   purge-флаги упразднены вместе со «слоёным» сносом).
 #
-# @param 1..N: string[]      # --purge-models | --purge-image
-# @stdout string             # ход слоёв + список нетронутых + сводка
-# @returns integer           # 0 — зачистка выполнена; 1 — согласие не дано
+# @param 1..N: string[]      # не предусмотрены (die)
+# @stdout string             # ход слоёв + сводка
+# @returns integer           # 0 — снятие выполнено; 1 — согласие не дано
 cmd_uninstall() {
-  local purge_models=0 purge_image=0 a home="${HOME:-}"
-  for a in "$@"; do
-    case "$a" in
-      --purge-models) purge_models=1 ;;
-      --purge-image)  purge_image=1 ;;
-      *) die "uninstall: неизвестный аргумент '$a' — доступно: --purge-models --purge-image" ;;
-    esac
-  done
-  local m="НЕ удаляются" i="НЕ"
-  [ "$purge_models" = 1 ] && m="удаляются (+ ~/gfctl-acc-models)"
-  [ "$purge_image" = 1 ] && i=""
-  ask "Удалить gfctl и контейнер gufo (модели ${m}, образ ${i} удаляется; приёмочные ~/gfctl-acc{,-src} тоже)? [y/N] " \
-    || die "uninstall отменён (удаление — только после согласия; повтори с --yes)"
-  echo "слой 1/5: контейнер"
+  [ -n "${1:-}" ] && die "uninstall: лишние аргументы '$*' — purge-флаги упразднены (лейаут 4.4): данные (.data/) и образ не удаляются — руками: rm -rf клона + podman rmi $IMAGE"
+  ask "Снять gfctl-сервер (контейнер + юниты + watchdog + linger + limits.d; данные .data/ и образ НЕ трогаются)? [y/N] " \
+    || die "uninstall отменён (снятие — только после согласия; повтори с --yes)"
+  echo "слой 1/4: контейнер"
   mkdir -p "$STACK_DIR"; touch "$STOP_MARKER"
   container_stop
-  echo "слой 2/5: юниты systemd-user"
+  echo "слой 2/4: юниты systemd-user (serve + watchdog + таймер)"
   systemctl --user disable "$UNIT_NAME-serve.service" "$UNIT_NAME-watchdog.timer" 2>/dev/null || true
   rm -f "$UNIT_DIR/$UNIT_NAME-serve.service" \
         "$UNIT_DIR/$UNIT_NAME-watchdog.service" \
         "$UNIT_DIR/$UNIT_NAME-watchdog.timer"
   systemctl --user daemon-reload 2>/dev/null || true
-  echo "слой 3/5: linger"
+  echo "слой 3/4: linger"
   sudo loginctl disable-linger "${USER:-$(id -un)}" 2>/dev/null || true
-  echo "слой 4/5: limits.d — НЕ трогаем (безвреден; переживает uninstall ради будущих сессий)"
-  echo "слой 5/5: дерево $STACK_DIR + приёмочные ~/gfctl-acc{,-src}"
-  if [ -e "$MODELS_BASE" ] || [ "$MODELS_BASE" = "$STACK_DIR/models" ]; then
-    # база весов внутри стека (дефолт): снести всё, КРОМЕ неё
-    find "$STACK_DIR" -mindepth 1 -maxdepth 1 ! -path "$MODELS_BASE" -exec rm -rf {} +
-  else
-    # база вне стека (--models-dir): стек целиком
-    rm -rf "$STACK_DIR"
-  fi
-  if [ -n "$home" ]; then
-    rm -rf "$home/gfctl-acc" "$home/gfctl-acc-src"
-  fi
-  if [ "$purge_models" = 1 ]; then
-    echo "докачка: --purge-models → удаляю $MODELS_BASE и ~/gfctl-acc-models"
-    rm -rf "$MODELS_BASE"
-    if [ -n "$home" ]; then rm -rf "$home/gfctl-acc-models"; fi
-  fi
-  [ "$purge_image" = 1 ] && { echo "докачка: --purge-image → удаляю образ $IMAGE"; podman rmi "$IMAGE" >/dev/null 2>&1 || true; }
-  echo "остались нетронутыми (uninstall их не трогает никогда): ~/gufo-models ~/gufo-exp ~/halogen-models ~/halogen-cache"
-  echo "uninstall готов. Модели: $([ "$purge_models" = 1 ] && echo удалены || echo "на месте ($MODELS_BASE)"). Образ: $([ "$purge_image" = 1 ] && echo удалён || echo "на месте ($IMAGE)")."
-  echo "Вернуть: gfctl install (дерево gfctl — заново ./install.sh)"
+  echo "слой 4/4: limits.d-файл"
+  sudo rm -f /etc/security/limits.d/99-gfctl-memlock.conf
+  echo "uninstall готов. Данные на месте ($STACK_DIR/.data), образ на месте ($IMAGE)."
+  echo "Полный снос — руками: rm -rf \"$STACK_DIR\" (клон вместе с .data) + podman rmi $IMAGE. Вернуть: cd \"$STACK_DIR\" && ./gfctl use <профиль>"
 }

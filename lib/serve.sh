@@ -112,7 +112,7 @@ container_stop() {
 #      evo-повтер, рестарт-restore; F9-флаги ровно, -p bind:port:port
 #      по канону, маунты: каталог-сет → /models:ro
 #      (контейнерные пути весов = /models/<файл>, как задуманы токены
-#      profiles.sh) и cache/<профиль> → /cache; хвост — serve_args из
+#      profiles.sh) и .data/cache/<профиль> → /cache; хвост — serve_args из
 #      канона); успех → выход; неудача → пауза 5 с и повтор (занятый порт
 #      и прочие транзитивные отказы, F10); все попытки неудачны → хвост
 #      podman logs + die.
@@ -132,7 +132,7 @@ container_stop() {
 container_up() {
   local prof="$1" set_name cache_dir attempt attempts="${GFCTL_RUN_ATTEMPTS:-3}" args
   set_name=$(profile_field "$prof" 1) || die "container_up: неизвестный профиль '$prof'"
-  cache_dir="$STACK_DIR/cache/$prof"
+  cache_dir="$STACK_DIR/.data/cache/$prof"
   mkdir -p "$cache_dir"
   sleep "${GFCTL_RECREATE_PAUSE_S:-3}"
   args=$(serve_args "$prof" "$(canon_sessions "$prof")" "$(canon_context "$prof")")

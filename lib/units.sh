@@ -27,7 +27,7 @@
 # @returns integer       # всегда 0 при возврате — нераскрытые плейсхолдеры
 #   завершают процесс die (exit 1), сбой чтения $1 — через set -e
 render_tpl() {
-  local tpl out; tpl="$(cat "$1")"; out="$2"; shift 2
+  local tpl out tpl_path="$1"; tpl="$(cat "$1")"; out="$2"; shift 2
   local kv name value
   # имена передавать в порядке убывания длины (длинное раньше короткого)
   for kv in "$@"; do
@@ -35,7 +35,8 @@ render_tpl() {
     tpl="${tpl//__${name}__/${value}}"
   done
   if printf '%s' "$tpl" | grep -qE '__[A-Z0-9_]+__'; then
-    die "нераскрытые плейсхолдеры в шаблоне $1"
+    # путь шаблона захвачен ДО shift 2 (после него $1 = первая пара)
+    die "нераскрытые плейсхолдеры в шаблоне $tpl_path"
   fi
   printf '%s\n' "$tpl" > "$out"
 }
@@ -49,7 +50,7 @@ render_tpl() {
 #   stop — cmd_off: у завершённого oneshot ExecStop не стреляет), 
 #   gfctl-watchdog.service (__STACK_DIR__ + Environment=GFCTL_DIR/GFCTL_MODELS —
 #   ре-рендер реальных значений: без них _boot/_watchdog при ребуте взяли бы
-#   дефолты диспетчера $HOME/gufo — дефект EXP-009) и gfctl-watchdog.timer — статичный
+#   дефолты (каталог gfctl-файла) — дефект EXP-009) и gfctl-watchdog.timer — статичный
 #   tpl без плейсхолдеров, install -m 0644 (OnUnitActiveSec=1min).
 #   enable/start/linger — НЕ здесь (autostart_on).
 #
@@ -58,9 +59,9 @@ render_tpl() {
 #
 # Ограничения/допущения: PODMAN_BIN = `command -v podman` В МОМЕНТ рендера —
 #   в батарее это PATH-заглушка (абс-путь faux), в проде /usr/bin/podman;
-#   юниты исполняют $STACK_DIR/gfctl — дерево в стеке раскладывает install.sh
-#   (D1: единственная точка установки). Живые вызовы: cmd_install/cmd_use
-#   (install_units) и autostart_on (перед enable).
+#   юниты исполняют $STACK_DIR/gfctl — дерево в стеке = сам git-клон
+#   (STACK_DIR = каталог gfctl-файла, 4.4; install.sh упразднён). Живые
+#   вызовы: cmd_install/cmd_use (install_units) и autostart_on (перед enable).
 #
 # @returns integer       # всегда 0 при возврате — die render_tpl и сбои
 #   mkdir/install завершают процесс по set -e

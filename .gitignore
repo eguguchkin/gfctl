@@ -8,3 +8,7 @@ tpl/python/__pycache__/
 .local-analysis/
 # прогоны EXP-окон (result-артефакты; сами EXP-скрипты — в git)
 .dev/external/*.result.txt
+# ДАННЫЕ сервера (лейаут 4.4: живут в клоне, вне git; git clean -fd безопасен,
+# git clean -fdx УДАЛЯЕТ данные — запрещён)
+.data/
+logs/

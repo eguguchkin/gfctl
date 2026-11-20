@@ -1,13 +1,18 @@
 #!/usr/bin/env bash
 # EXP-008-delivery — «доставка с нуля» (этап 4, PLAN п.2): полный цикл
-# локальной дистрибуции (D1) на приёмочной машине: tar-перенос дерева →
-# install.sh (bootstrap-FIRST — урок F21) → gfctl install (докачка только
-# недостающих весов) → use канон → agent-check → gfctl off.
+# локальной дистрибуции на приёмочной машине: tar-перенос дерева (клона) в
+# ~/gfctl → gfctl install (bootstrap .data/ первого запуска — сам диспетчер,
+# лейаут 4.4: install.sh упразднён; юниты при install/use) → use канон →
+# agent-check → gfctl off.
 #
 # REPLANNED 2026-11-18 ai-расклад (дельта: .dev/tasks/4/4.2-EXP-replan.md):
 #   - машины ai-owned: юзер ai (uid 1002, sudo NOPASSWD, linger on); юзер
 #     hipfire retired (логин заблокирован) — НЕ использовать; все пути
-#     /home/ai/* (стек ~/gufo, веса ~/gufo-models и ~/gfctl-acc-models);
+#     /home/ai/*;
+#   - 2026-11-20 (лейаут 4.4): стек = клон ~/gfctl (GFCTL_DIR/GFCTL_MODELS
+#     не задаются — диспетчер сам детектит каталог gfctl-файла; данные
+#     ~/gfctl/.data: модели .data/models/<сет>, логи .data/logs); пулы
+#     ~/gufo-models и ~/gfctl-acc-models — источники хардлинков до миграции;
 #   - hfctl-прод (порт 11435) гасится ДО окна `hfctl off` ОТ ИМЕНИ ai с
 #     ОБЯЗАТЕЛЬНЫМ возвратом linger (`sudo loginctl enable-linger ai`):
 #     после off linger=no и юзер-менеджер гаснет ~10 с (GOTCHAS llm-lab),
@@ -28,11 +33,13 @@
 # пользователя. ЭТА ЗАГОТОВКА В РЕПО НЕ ИСПОЛНЯЕТСЯ (bash -n only).
 #
 # GOAL:
-#   - tar-перенос дерева репо (без .git/.dev) в ~/gfctl-acc-src;
-#   - bootstrap-first: install.sh → ~/gfctl-acc (F21: каждый EXP начинает
-#     remote-часть с bootstrap — приёмка всегда идёт свежим кодом);
+#   - tar-перенос дерева репо (без .git/.dev/.data) в ~/gfctl (клон = стек);
+#   - bootstrap первого запуска (лейаут 4.4): ./gfctl сам создаёт каркас
+#     .data/ при любом вызове — отдельного install.sh больше нет; юниты
+#     ставит первый install/use (после канона);
 #   - предусловие «gfctl не установлен или uninstall'нут»: старая приёмочная
-#     инсталляция ~/gfctl-acc снимается БЕЗ purge (модели/образ щадятся);
+#     инсталляция ~/gfctl-acc снимается uninstall'ом + rm -rf руками
+#     (uninstall v2 дерево не трогает);
 #   - веса: хардлинки уже скачанных файлов из ~/gufo-models и
 #     ~/gfctl-acc-models (как EXP-005; если источников нет — gfctl install
 #     скачает сам, трафик по пинам);
@@ -88,28 +95,28 @@ SSH="ssh -i $GF_ACC_KEY -o BatchMode=yes -o ConnectTimeout=10"
 
 exec > >(tee "$RES") 2>&1
 
-echo "== EXP-008: снос СТАРОЙ инсталляции (uninstall снесёт acc/acc-src — поэтому ДО tar)"
-$SSH "$GF_ACC_USER@$GF_ACC_HOST" 'if [ -x "$HOME/gfctl-acc/gfctl" ]; then GFCTL_YES=1 "$HOME/gfctl-acc/gfctl" uninstall; else echo "(не было — чистая машина)"; fi' || {
+echo "== EXP-008: снос СТАРОЙ инсталляции (uninstall v2: юниты/контейнер/linger/limits.d; дерево сносится руками — 4.4)"
+$SSH "$GF_ACC_USER@$GF_ACC_HOST" 'if [ -x "$HOME/gfctl-acc/gfctl" ]; then GFCTL_YES=1 "$HOME/gfctl-acc/gfctl" uninstall; rm -rf "$HOME/gfctl-acc"; else echo "(не было — чистая машина)"; fi' || {
   echo "RESULT: ERROR — uninstall старой инсталляции не прошёл"; exit 1; }
 
-echo "== EXP-008: tar-перенос дерева (без .git/.dev)"
-$SSH "$GF_ACC_USER@$GF_ACC_HOST" 'rm -rf ~/gfctl-acc-src && mkdir -p ~/gfctl-acc-src' || {
+echo "== EXP-008: tar-перенос дерева-клона (без .git/.dev/.data) в ~/gfctl"
+$SSH "$GF_ACC_USER@$GF_ACC_HOST" 'mkdir -p ~/gfctl' || {
   echo "RESULT: ERROR — ssh не прошёл"; exit 1; }
-tar -C "$ROOT" --exclude=.git --exclude=.dev -cf - . | \
-  $SSH "$GF_ACC_USER@$GF_ACC_HOST" 'tar -C ~/gfctl-acc-src -xf -' || {
+tar -C "$ROOT" --exclude=.git --exclude=.dev --exclude=.data -cf - . | \
+  $SSH "$GF_ACC_USER@$GF_ACC_HOST" 'tar -C ~/gfctl -xf -' || {
   echo "RESULT: ERROR — ssh не прошёл"; exit 1; }
 
 $SSH "$GF_ACC_USER@$GF_ACC_HOST" "GF_ACC_FLAVOR=$GF_ACC_FLAVOR bash -s" <<'REMOTE' || {
   set -u
-  export GFCTL_DIR="$HOME/gfctl-acc" GFCTL_MODELS="$HOME/gfctl-acc-models" GFCTL_YES=1
-  GF="$HOME/gfctl-acc/gfctl"
+  export GFCTL_YES=1
+  GF="$HOME/gfctl/gfctl"
 
-  echo "== bootstrap-first (F21): install.sh (свежее дерево из src)"
-  bash "$HOME/gfctl-acc-src/install.sh" || exit 44
+  echo "== bootstrap первого запуска (лейаут 4.4 — сам диспетчер): ./gfctl status (каркас .data/; канона нет — честный отчёт)"
+  "$GF" status || true
 
   echo "== веса: хардлинки из пулов ai — ~/gufo-models + ~/gfctl-acc-models (сеты прошлых EXP)"
   setname=${GF_ACC_FLAVOR%%-*}   # 27b | flash — имена каталогов-сетов MODELS_BASE (profiles.sh)
-  tgt="$HOME/gfctl-acc-models/$setname"
+  tgt="$HOME/gfctl/.data/models/$setname"
   mkdir -p "$tgt"
   du -sh "$HOME/gufo-models" "$HOME/gfctl-acc-models" 2>/dev/null || true
   n=0
@@ -154,7 +161,7 @@ $SSH "$GF_ACC_USER@$GF_ACC_HOST" "GF_ACC_FLAVOR=$GF_ACC_FLAVOR bash -s" <<'REMOT
   echo "--- EXP-008 remote done ---"
 REMOTE
   rc=$?
-  echo "RESULT: FAIL — remote-часть rc=$rc (44=bootstrap, 45=uninstall, 46=install, 54=podman save, 47=use, 48=agent-check)"; exit 1; }
+  echo "RESULT: FAIL — remote-часть rc=$rc (45=uninstall, 46=install, 54=podman save, 47=use, 48=agent-check)"; exit 1; }
 
 echo "== EXP-008: критерии PASS"
 grep -q '^SMOKE: OK' "$RES" || { echo "RESULT: FAIL — install не дошёл до SMOKE: OK"; exit 1; }

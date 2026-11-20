@@ -1,8 +1,8 @@
 # gfctl — деплой и управление gufo-сервером (продукт)
 
-Продукт: CLI `gfctl` + bootstrap `install.sh` для постановки и обслуживания
-сервера **gufo** (`ghcr.io/gufo-org/toolboxes/gufo-runtime`) на «голой»
-Ubuntu/Debian (AMD Strix Halo / gfx1151) с моделями **qwen3.8-27B** и
+Продукт: CLI `gfctl` для постановки и обслуживания сервера **gufo**
+(`ghcr.io/gufo-org/toolboxes/gufo-runtime`) на «голой» Ubuntu/Debian
+(AMD Strix Halo / gfx1151) с моделями **qwen3.8-27B** и
 **qwen3.8-flash-next**, соло и мульти, под агентские сценарии.
 
 Сестринский продукт к `hfctl` (движок hipfire): та же философия — официальный
@@ -13,16 +13,33 @@ che-evo (60 GiB) и che-FAEX1 (128 GB).
 Язык ответов — русский. Ответы подробные — но на простых задачах коротко и
 по существу.
 
-## Что в репо (план)
+## Лейаут 4.4: одна папка = git-клон = стек
 
-- `gfctl` — диспетчер (env-конфигурация + source модулей + dispatch); в
-  инсталляции живёт в `~/gufo/gfctl`, `~/.local/bin/gfctl` = симлинк.
-- `install.sh` — bootstrap: копирует `gfctl`+`lib/`+`tpl/` в `~/gufo/`,
-  симлинк в bin, проверка PATH. Единственная точка установки/обновления.
-- `lib/` — модули: install, profiles, models, serve (unit-generation),
-  autostart/watchdog, health, bench, agentcheck, doctor, state, util, ui.
-- `tpl/` — systemd-юниты (serve/boot/watchdog), python-харнесы (watch,
-  agent-check), bench-фикстура (канон `253c7ac5`), env-шаблон.
+- `STACK_DIR` = каталог gfctl-файла (`readlink -f`, не cwd; `GFCTL_DIR`
+  переопределяет). Запуск из любого подкаталога клона и через симлинк.
+- Данные сервера — в `.data/` клона (вне git): `models/{27b,flash}`,
+  `cache/<профиль>`, `logs/`; канон `.env` и маркер `.gfctl-stopped` — в
+  корне клона. **Данные — инвариант**: uninstall и `git clean -fd` их не
+  трогают; `git clean -fdx` ЗАПРЕЩЁН (bootstrap при каждом запуске
+  проверяет `.gitignore` — без `.data/`+`logs/` печатает warn).
+- Bootstrap «первого запуска»: любой вызов `./gfctl` создаёт каркас
+  `.data/` (юниты НЕ ставит); systemd-юниты ставят `use`/`install`
+  идемпотентно — после записи канона; enable/linger — `on`/`install`.
+- `install.sh` упразднён (4.4): доставка = git clone; полный снос стека —
+  руками (`rm -rf` клона + `podman rmi`).
+- `uninstall` (v2): контейнер + юниты + watchdog + linger + limits.d-файл;
+  purge-флагов нет. Исключения вне клона описаны в
+  `.dev/tasks/4/4.4-layout-python-decision.md` (таблица инварианта).
+
+## Что в репо
+
+- `gfctl` — диспетчер (env-конфигурация + bootstrap + source модулей +
+  dispatch).
+- `lib/` — модули: profiles, models, state (канон), serve, units,
+  health, agentcheck, autostart/watchdog, commands.
+- `tpl/` — systemd-юниты (serve/watchdog/timer), python-харнесы (watch,
+  agent-check, gguf-type-check, smoke), bench-фикстура (канон
+  `253c7ac5`), env-шаблон.
 - `.dev/` — blackboard dev-flow: SPEC.md, PLAN.md, STATE.md, DECISIONS.md,
   FACTS.md, tasks/, external/ (EXP-очередь), archive/.
 

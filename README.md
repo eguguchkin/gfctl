@@ -5,18 +5,28 @@
 **qwen3.8-27B** и **qwen3.8-flash-next** — соло и мульти, под агентские
 сценарии. Сестринский продукт к hfctl (движок hipfire).
 
-> Статус: этапы 1–3 закрыты, этап 4 (хардening/доставка) в работе — все
-> команды карты SPEC §3 живы: установка, профили + probe, bench, watch,
-> cache, agent-check, слоёный uninstall с purge-границами.
+> Статус: этапы 1–4 закрыты. Лейаут 4.4: одна папка = git-клон = стек;
+> данные сервера в `.data/` (инвариант — uninstall и `git clean -fd` их не
+> трогают); `install.sh` упразднён — bootstrap первого запуска делает сам
+> диспетчер.
 
-## Quickstart — 4 команды от клонирования до работающего сервера (SPEC §1)
+## Quickstart — 4 команды от клонирования до работающего сервера
 
 ```bash
-git clone <путь-к-репо>/gfctl && cd gfctl   # локальная дистрибуция (D1): rsync -a / scp -r / git по LAN
-./install.sh                                # bootstrap: дерево gfctl+lib+tpl → ~/gufo/, симлинк ~/.local/bin/gfctl
-gfctl install                               # гейты → веса (после согласия) → юниты → старт → health → smoke → автозапуск
-gfctl status                                # проверка: профиль / health / роут / кэш / автозапуск
+git clone https://github.com/eguguchkin/gfctl && cd gfctl   # клон = стек: gfctl, lib/, tpl/, данные .data/
+./gfctl use 27b-single    # bootstrap .data/ → веса (после согласия) → юниты → старт → health → smoke
+./gfctl status            # профиль / health / роут / кэш / автозапуск
+./gfctl watch             # живой дашборд (/metrics + host /proc+/sys + логи)
 ```
+
+gfctl работает от местоположения gfctl-файла (не от cwd) — запуск из любого
+подкаталога клона и через симлинк указывает на тот же стек. Данные живут в
+`.data/` клона (вне git): `models/{27b,flash}`, `cache/<профиль>`, `logs/`.
+Поэтому **`git clean -fd` безопасен, а `git clean -fdx` ЗАПРЕЩЁН** — он
+удалит модели/кэш/логи. Вернуть сервер после `gfctl off`/`uninstall` —
+`gfctl on` (юниты + linger) или снова `gfctl use <профиль>`. Одна
+инсталляция на пользователя: второй клон = конфликт имени контейнера `gufo`
+и порта 8080.
 
 ## Профили
 
@@ -27,19 +37,21 @@ gfctl status                                # проверка: профиль /
 | `flash-multi` | UD-Q4_K_XL 4 шара + MTP | ≥110 GiB | 2 × max (probe-лестница, floor 131072) | mtp |
 
 Порт по умолчанию **8080**, bind `0.0.0.0`. Конфигурация env'ами:
-`GFCTL_IMAGE`, `GFCTL_DIR`, `GFCTL_MODELS`, `GFCTL_PORT`, `GFCTL_BIND`,
-`GFCTL_YES`. Инсталляция живёт в `~/gufo/`.
+`GFCTL_IMAGE`, `GFCTL_DIR` (каталог стека; по умолчанию — каталог
+gfctl-файла), `GFCTL_MODELS`, `GFCTL_PORT`, `GFCTL_BIND`, `GFCTL_YES`.
 
 ## Полная карта команд
 
 `install` · `use` · `status [--json]` · `logs` · `watch` · `on`/`off` ·
-`uninstall [--purge-models] [--purge-image]` · `bench` · `smoke` ·
-`agent-check` · `cache [--verify]` · `doctor` ·
-`models [--check-types | download <сет>]` · `--help` — все команды живы
-(см. `gfctl --help`). Подготовительные шаги при желании — до
-`gfctl install`: `gfctl doctor` (диагностика), `gfctl models
---check-types` (pre-check GGUF-типов), `gfctl models download <сет>
-[--yes]` (веса отдельно).
+`uninstall` · `bench` · `smoke` · `agent-check` · `cache [--verify]` ·
+`doctor` · `models [--check-types | download <сет>]` · `--help` — все
+команды живы (см. `gfctl --help`). `use`/`install` сами ставят юниты
+идемпотентно (после записи канона). `uninstall` снимает контейнер + юниты +
+watchdog + linger + limits.d-файл и **не трогает данные**: `.data/` и
+podman-образ остаются — полный снос руками (`rm -rf <клон>` +
+`podman rmi <образ>`). Подготовительные шаги при желании — до `gfctl use`:
+`gfctl doctor` (диагностика), `gfctl models --check-types` (pre-check
+GGUF-типов), `gfctl models download <сет> [--yes]` (веса отдельно).
 
 ## Разработка
 
@@ -53,11 +65,10 @@ gfctl status                                # проверка: профиль /
 ## Схема репо
 
 ```
-gfctl          # диспетчер (env-шапка + log/warn/die/ask + case-роутер)
-install.sh     # bootstrap: ~/gufo + симлинк (полное поведение — этап 1.2/4)
-lib/           # profiles.sh, models.sh, commands.sh (модули добавляются по мере команд)
-tpl/python/    # gguf_type_check.py — потоковый pre-check GGUF-типов
-tpl/bench/     # merge_sort_thinking_off.txt — канон фикстуры bench (md5 253c7ac5)
+gfctl          # диспетчер: STACK_DIR-детект (каталог gfctl-файла) + bootstrap первого запуска + роутер
+lib/           # profiles.sh, models.sh, state.sh, serve.sh, units.sh, health.sh, agentcheck.sh, autostart.sh, commands.sh
+tpl/           # systemd-юниты, python-харнесы (watch/agent-check/gguf/smoke), bench-фикстура, env-шаблон
 tests/         # run_checks.sh + make_fixtures.py + fixtures/*.gguf (мини-GGUF ассеты)
+.data/         # ДАННЫЕ сервера (вне git, создаёт bootstrap): models/{27b,flash}, cache/<профиль>, logs/
 .dev/          # blackboard dev-flow
 ```

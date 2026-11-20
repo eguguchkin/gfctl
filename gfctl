@@ -1,10 +1,11 @@
 #!/usr/bin/env bash
 # === USAGE-BEGIN ===
 # gfctl — деплой и управление gufo-сервером (Strix Halo / gfx1151) на
-# Ubuntu/Debian. Раскладывается деревом: диспетчер gfctl + lib/*.sh + tpl/
-# (шаблоны юнитов/python-харнесов/фикстуры); запускается ОТ СВОЕГО ИМЕНИ
+# Ubuntu/Debian. Репозиторий = стек: git-клон (каталог gfctl-файла), данные
+# сервера — в .data/ клона (вне git); запускается ОТ СВОЕГО ИМЕНИ
 # (не root; sudo применяется точечно):
-#   перенос каталога на машину && ./install.sh   # дерево в ~/gufo + симлинк в bin
+#   git clone https://github.com/eguguchkin/gfctl && cd gfctl
+#   ./gfctl use <профиль>   # первый запуск: bootstrap .data/ → веса → юниты → старт
 #
 # Команды:
 #   install [--profile P] [--port N] [--bind A] [--models-dir D] [--no-autostart]
@@ -19,7 +20,9 @@
 #   watch [--interval N]    — живой дашборд (/metrics, host /proc+/sys, логи)
 #   on | off                — автозапуск вкл / выкл (off = стоп + снятие;
 #                             файлы/веса/образ целы)
-#   uninstall [--purge-models] [--purge-image]
+#   uninstall               — снять контейнер + юниты + watchdog + linger +
+#                             limits.d-файл; данные .data/ и образ НЕ трогает
+#                             (полный снос — руками: rm -rf клона + podman rmi)
 #   bench                   — фикстура merge_sort (253c7ac5) ×3 по HTTP
 #   smoke                   — health + 3 запроса + роут из лога
 #   agent-check             — агентская самопроверка (SPEC §7; 25 запросов:
@@ -32,7 +35,8 @@
 #   models download <сет|профиль> [--yes]
 #                           — докачка весов: pre-flight «нужно X GiB», curl
 #                             resume, sha256-verify после
-# Конфигурация (env переопределяет): GFCTL_IMAGE, GFCTL_DIR, GFCTL_MODELS,
+# Конфигурация (env переопределяет): GFCTL_IMAGE, GFCTL_DIR (каталог стека;
+# по умолчанию — каталог gfctl-файла, не cwd), GFCTL_MODELS,
 # GFCTL_PORT, GFCTL_BIND, GFCTL_YES, GFCTL_MIRROR_BASE (зеркало весов:
 # первая попытка докачки = <база>/<имя файла пина>; пусто = пин-URL HF).
 # === USAGE-END ===
@@ -41,8 +45,11 @@ set -euo pipefail
 # ── конфигурация (env переопределяет) ───────────────────────────────────────
 # @type /^[\w./-]+:[\w.-]+$/ IMAGE="${GFCTL_IMAGE:-ghcr.io/gufo-org/toolboxes/gufo-runtime:latest}" # образ ghcr с тегом (форки запрещены — SPEC §1)
 IMAGE="${GFCTL_IMAGE:-ghcr.io/gufo-org/toolboxes/gufo-runtime:latest}"
-STACK_DIR="${GFCTL_DIR:-$HOME/gufo}"             # вся инсталляция здесь (диспетчер, lib/, tpl/, модели, кэш)
-MODELS_BASE="${GFCTL_MODELS:-$STACK_DIR/models}" # база весов; внутри — каталог-сет (27b, flash)
+SELF="$(readlink -f "$0")"                       # путь диспетчера (симлинк → файл: стек за симлинком)
+# STACK_DIR = каталог gfctl-файла (git-клон = стек; запуск из любого
+# подкаталога клона; GFCTL_DIR переопределяет — дефолта $HOME/gufo НЕТ, 4.4)
+STACK_DIR="${GFCTL_DIR:-$(cd "$(dirname "$SELF")" && pwd)}"
+MODELS_BASE="${GFCTL_MODELS:-$STACK_DIR/.data/models}" # база весов (.data/ — вне git); внутри — каталог-сет (27b, flash)
 # @type /^\d+$/              PORT="${GFCTL_PORT:-8080}"                              # TCP-порт сервера; переопределение — env GFCTL_PORT (D2)
 PORT="${GFCTL_PORT:-8080}"
 # @type /^[\d.]+$/           BIND="${GFCTL_BIND:-0.0.0.0}"                           # адрес bind (LAN без ключа); переопределение — env GFCTL_BIND
@@ -51,11 +58,10 @@ STOP_MARKER="$STACK_DIR/.gfctl-stopped"          # явная остановка
 # @type /^[\w-]+$/           CONTAINER="${GFCTL_CONTAINER:-gufo}"                    # имя контейнера podman (rm+run recreate — SPEC §8)
 CONTAINER="${GFCTL_CONTAINER:-gufo}"
 UNIT_NAME=gfctl                                  # база имён юнитов: gfctl-serve.service, gfctl-watchdog.service/.timer
-LOGS_DIR="$STACK_DIR/logs"                       # watchdog/boot-события (контейнерные логи — podman logs)
+LOGS_DIR="$STACK_DIR/.data/logs"                 # watchdog/probe/agent-check события (в .data — вне git)
 UNIT_DIR="$HOME/.config/systemd/user"            # systemd-user юниты (SPEC §2: вне каталога стека)
-SELF="$(readlink -f "$0")"
-LIB_DIR="$(cd "$(dirname "$SELF")" && pwd)/lib"  # дерево = рядом с диспетчером
-TPL_DIR="$(cd "$(dirname "$SELF")" && pwd)/tpl"
+LIB_DIR="$(dirname "$SELF")/lib"                 # дерево = рядом с диспетчером (symlink-safe через SELF)
+TPL_DIR="$(dirname "$SELF")/tpl"
 
 # ── общие хелперы ────────────────────────────────────────────────────────────
 # Назначение: единый заголовок этапа — жирная голубая строка «== <текст>» в
@@ -137,6 +143,35 @@ ask() {  # ask <question> — 0 при да; при не-TTY и без --yes —
 # @returns integer    # 0 — только цифры; 1 — иначе
 isint() { case "$1" in ''|*[!0-9]*) return 1 ;; *) return 0 ;; esac; }
 
+# ── bootstrap «первого запуска» (лейаут 4.4) ────────────────────────────────
+# Назначение: гарантировать каркас данных клона — .data/{models/{27b,flash},
+#   cache,logs} — при КАЖДОМ запуске диспетчера (идемпотентно, без юнитов:
+#   systemd-юниты ставятся при первом use/install — после записи канона,
+#   до него поднимать нечего) и проверить .gitignore клона: строки `.data/`
+#   и `logs/` обязаны игнорироваться (репо = стек, данные живут рядом с кодом;
+#   иначе `git clean -fdx` снесёт модели/кэш/логи) — нарушение → warn.
+#
+# Побочные эффекты: mkdir -p четырёх каталогов .data/ (существующие —
+#   no-op); warn в stderr при неполном .gitignore. Канон .env, маркер
+#   остановки и юниты НЕ создаёт.
+#
+# Ограничения/допущения: вызывается в верхнеуровневом скоупе диспетчера до
+#   source lib (не зависит от модулей); grep -Fqx — точные строки, `.` в
+#   имени не трактуется как метасимвол; отсутствие .gitignore = нарушение
+#   (warn), не отказ — команды работают и без git.
+#
+# @returns integer          # всегда 0 — только mkdir/grep/warn
+bootstrap_dirs() {
+  mkdir -p "$STACK_DIR/.data/models/27b" "$STACK_DIR/.data/models/flash" \
+           "$STACK_DIR/.data/cache" "$STACK_DIR/.data/logs"
+  if [ ! -f "$STACK_DIR/.gitignore" ] \
+     || ! grep -Fqx '.data/' "$STACK_DIR/.gitignore" \
+     || ! grep -Fqx 'logs/' "$STACK_DIR/.gitignore"; then
+    warn "в .gitignore клона нет '.data/' и/или 'logs/' — git clean -fdx удалит данные сервера (модели/кэш/логи); git clean -fdx ЗАПРЕЩЁН (верни .gitignore из репо)"
+  fi
+}
+bootstrap_dirs
+
 # ── lib-модули (порядок: от данных к командам; зависимости функций — lazy) ──
 # Назначение: подключение дерева lib/ — порядок source фиксирован и значим.
 #
@@ -151,7 +186,7 @@ isint() { case "$1" in ''|*[!0-9]*) return 1 ;; *) return 0 ;; esac; }
 #   только функции — вызов позже source.
 source "$LIB_DIR/profiles.sh"   # таблица профилей + resolve + RAM-гейт-строки
 source "$LIB_DIR/models.sh"     # таблица весов + download + check-types
-source "$LIB_DIR/state.sh"      # канон профиля ~/gufo/.env (env > .env > дефолт)
+source "$LIB_DIR/state.sh"      # канон профиля $STACK_DIR/.env (env > .env > дефолт)
 source "$LIB_DIR/serve.sh"      # serve-строка из таблицы + container_up (recreate)
 source "$LIB_DIR/units.sh"      # render_tpl + генерация systemd-user юнитов
 source "$LIB_DIR/health.sh"     # load_completed/http_ready/smoke (роут)

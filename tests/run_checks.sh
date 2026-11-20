@@ -24,6 +24,11 @@ rc_out() {
   printf '%s\n%s' "$rc" "$out"
 }
 
+# канон .gitignore стека (лейаут 4.4): bootstrap-предупреждение молчит,
+# кроме теста негативной ветки (§13)
+mkdir -p "$TMP/stack"
+printf '.data/\nlogs/\n' > "$TMP/stack/.gitignore"
+
 # ── faux-bin: PATH-заглушки внешних бинарей (Test strategy task.md 1.2) ────
 # Каждая пишет в $GFCTL_FAUX_LOG построчно «<cmd> <args…>» и сценарится
 # env-флагами GFCTL_FAUX_*; ролей не делают (никаких реальных podman/
@@ -217,11 +222,11 @@ gf() {  # gf <bash-код> — stdout+stderr и rc наружу
     export GFCTL_RECREATE_PAUSE_S=0 GFCTL_HEALTH_POLL=1 GFCTL_SMOKE_RETRY_S=0
     HOME="$TMP/home" USER="tester"
     IMAGE="ghcr.io/gufo-org/toolboxes/gufo-runtime:latest"
-    STACK_DIR="$TMP/stack" MODELS_BASE="$TMP/stack/models"
+    STACK_DIR="$TMP/stack" MODELS_BASE="$TMP/stack/.data/models"
     PORT=8080 BIND="0.0.0.0"
     STOP_MARKER="$STACK_DIR/.gfctl-stopped"
     CONTAINER="gufo" UNIT_NAME="gfctl"
-    LOGS_DIR="$STACK_DIR/logs" UNIT_DIR="$HOME/.config/systemd/user"
+    LOGS_DIR="$STACK_DIR/.data/logs" UNIT_DIR="$HOME/.config/systemd/user"
     ASSUME_YES=1 SELF="$ROOT/gfctl" LIB_DIR="$ROOT/lib" TPL_DIR="$ROOT/tpl"
     log()  { printf '\n== %s\n' "$*"; }
     warn() { printf 'WARN: %s\n' "$*" >&2; }
@@ -551,24 +556,42 @@ st_out=$(GFCTL_PORT=8198 ./gfctl status)
 grep -q '^профиль: 27b-single | health: не запущен | автозапуск: — | роут: — | кэш: — | веса 27b: 0/2$' <<<"$st_out" \
   && ok "status: одна строка, мёртвый порт (null'ы схемы 1.1)" || bad "status строка: '$st_out'"
 
-echo "== 13. установка каркаса: install.sh в $TMP/gufo"
-set +e; GFCTL_DIR="$TMP/gufo" ./install.sh >"$TMP/inst.out" 2>&1; in_rc=$?; set -e
-[ "$in_rc" = 0 ] && [ -x "$TMP/gufo/gfctl" ] && [ -d "$TMP/gufo/lib" ] && [ -d "$TMP/gufo/tpl" ] \
-  && ok "install.sh: дерево раскладано" || bad "install.sh раскладка (rc=$in_rc)"
-cmp -s /workspace/hfctl/tpl/bench/merge_sort_thinking_off.txt "$TMP/gufo/tpl/bench/merge_sort_thinking_off.txt" \
-  && ok "фикстура bench доложена в дерево" || bad "bench-фикстура в дереве"
-set +e; (cd / && GFCTL_DIR="$TMP/gufo2" bash "$ROOT/install.sh" >/dev/null 2>&1); inst_rc=$?; set -e
-if [ "$inst_rc" = 0 ]; then ok "install.sh: идемпотентный повтор = обновление (rc 0)"; else bad "install.sh повтор (rc=$inst_rc)"; fi
-mkdir -p "$TMP/lonely"; cp install.sh "$TMP/lonely/"
-set +e; bash "$TMP/lonely/install.sh" >/dev/null 2>&1; away_rc=$?; set -e
-[ "$away_rc" = 1 ] && ok "install.sh вне дерева (без gfctl/lib рядом) → rc 1" || bad "install.sh вне дерева (rc=$away_rc)"
+echo "== 13. лейаут 4.4: bootstrap первого запуска (каркас .data/ БЕЗ юнитов), STACK_DIR-детект (подкаталог/симлинк), gitignore-контроль"
+FC="$TMP/fresh-clone"; FH="$TMP/fresh-home"
+mkdir -p "$FC" "$FH"; cp -r gfctl lib tpl .gitignore "$FC/"
+# STACK_DIR-детект (г): запуск из ПОДКАТАЛОГА клона, без GFCTL_DIR — стек = каталог gfctl-файла
+set +e; (cd "$FC/lib" && env -u GFCTL_DIR HOME="$FH" bash "$FC/gfctl" doctor >"$TMP/bs.out" 2>&1); bs_rc=$?; set -e
+[ "$bs_rc" = 0 ] && ok "gfctl из подкаталога клона (без GFCTL_DIR): doctor rc 0" || bad "подкаталог-запуск (rc=$bs_rc)"
+[ -d "$FC/.data/models/27b" ] && [ -d "$FC/.data/models/flash" ] && [ -d "$FC/.data/cache" ] && [ -d "$FC/.data/logs" ] \
+  && ok "bootstrap первого запуска (а): каркас .data/{models/{27b,flash},cache,logs} создан (в корне клона, не в cwd)" \
+  || bad "bootstrap каркас .data/ неполон: $(find "$FC/.data" -maxdepth 2 2>/dev/null | tr '\n' ' ')"
+[ ! -e "$FH/.config/systemd/user/gfctl-serve.service" ] \
+  && ok "bootstrap (а): юниты systemd НЕ ставятся (ставятся при первом use/install)" || bad "bootstrap поставил юниты!"
+[ ! -e "$FC/.env" ] && ok "bootstrap (а): канона нет (появится при первом use)" || bad "bootstrap написал .env"
+! grep -q 'git clean' "$TMP/bs.out" \
+  && ok "bootstrap: канон .gitignore (.data/+logs/) — без WARN" || bad "ложный gitignore-WARN при каноне"
+# STACK_DIR-детект через СИМЛИНК (механика readlink -f: стек за симлинком, не cwd / и не bin/)
+FC2="$TMP/fresh-clone2"; FH2="$TMP/fresh-home2"
+mkdir -p "$FC2" "$FH2/bin"; cp -r gfctl lib tpl .gitignore "$FC2/"; ln -s "$FC2/gfctl" "$FH2/bin/gfctl"
+set +e; (cd / && env -u GFCTL_DIR HOME="$FH2" "$FH2/bin/gfctl" doctor >/dev/null 2>&1); sl_rc=$?; set -e
+[ "$sl_rc" = 0 ] && [ -d "$FC2/.data/models/27b" ] \
+  && ok "STACK_DIR-детект: симлинк ~/.local/bin/gfctl → стек = каталог файла за симлинком (readlink -f)" \
+  || bad "симлинк-детект (rc=$sl_rc)"
+# негатив .gitignore: клона-п двойника без .gitignore → warn «git clean -fdx запрещён»
+FW="$TMP/fresh-warn"; FWH="$TMP/warn-home"; mkdir -p "$FW" "$FWH"; cp -r gfctl lib tpl "$FW/"   # .gitignore НЕ копируем
+set +e; (cd "$FW" && env -u GFCTL_DIR HOME="$FWH" bash "$FW/gfctl" doctor >"$TMP/bw.out" 2>&1); bw_rc=$?; set -e
+grep -q 'git clean -fdx ЗАПРЕЩЁН' "$TMP/bw.out" \
+  && ok "bootstrap-негатив: без .gitignore → WARN «git clean -fdx запрещён»" || bad "нет gitignore-WARN (rc=$bw_rc)"
+[ ! -e install.sh ] \
+  && ok "install.sh упразднён из репо (bootstrap первого запуска — сам диспетчер, 4.4)" \
+  || bad "install.sh всё ещё в репо"
 
 echo "== 14. state: write_canon = env.tpl + пар-блок (2.1); canon_get env > .env > default; canon_pair_context"
 : > "$FAUXLOG"
 gf 'write_canon 27b-single 1 262144' >/dev/null 2>&1
 sed -e 's/__PROFILE__/27b-single/' -e 's/__SESSIONS__/1/' -e 's/__CONTEXT__/262144/' \
     -e 's/__PORT__/8080/' -e 's/__BIND__/0.0.0.0/' \
-    -e "s|__MODELS_DIR__|$TMP/stack/models|" \
+    -e "s|__MODELS_DIR__|$TMP/stack/.data/models|" \
     -e "s|__IMAGE__|ghcr.io/gufo-org/toolboxes/gufo-runtime:latest|" \
     tpl/env/env.tpl > "$TMP/env.want"
 printf 'GFCTL_CTX_27b_single_1=262144\n' >> "$TMP/env.want"
@@ -603,7 +626,7 @@ gf 'write_canon 27b-single 1 262144' >/dev/null 2>&1
 [ "$(gf 'GFCTL_CTX_27b_multi_4=999; canon_pair_context 27b-multi 4')" = 999 ] \
   && ok "canon_pair_context: env-оверрайд пары > .env (носитель probe-попыток)" || bad "pair env"
 # 1.2-совместимость: .env без пар-ключей (EXP-004-формат) читается fallback'ом
-printf 'GFCTL_PROFILE=27b-multi\nGFCTL_SESSIONS=2\nGFCTL_CONTEXT=163840\nGFCTL_PORT=8080\nGFCTL_BIND=0.0.0.0\nGFCTL_MODELS=%s\nGFCTL_IMAGE=ghcr.io/gufo-org/toolboxes/gufo-runtime:latest\n' "$TMP/stack/models" > "$TMP/stack/.env"
+printf 'GFCTL_PROFILE=27b-multi\nGFCTL_SESSIONS=2\nGFCTL_CONTEXT=163840\nGFCTL_PORT=8080\nGFCTL_BIND=0.0.0.0\nGFCTL_MODELS=%s\nGFCTL_IMAGE=ghcr.io/gufo-org/toolboxes/gufo-runtime:latest\n' "$TMP/stack/.data/models" > "$TMP/stack/.env"
 [ "$(gf 'canon_pair_context 27b-multi 2')" = 163840 ] \
   && ok "1.2-формат: активные поля канона = канон пары (миграция чтением)" || bad "pair fallback 1.2"
 [ -z "$(gf 'canon_pair_context 27b-multi 3')" ] \
@@ -636,13 +659,15 @@ gf 'render_tpl "$TMP/u1.tpl" "$TMP/u1.out" PODMAN_BIN="/usr/bin/podman" STACK_DI
 [ "$(cat "$TMP/u1.out")" = "host /home/x/gufo podman /usr/bin/podman c gufo" ] \
   && ok "render_tpl: __X__ → значения" || bad "render_tpl подстановка"
 set +e; printf 'oops __BOGUS__\n' > "$TMP/u2.tpl"
-gf 'render_tpl "$TMP/u2.tpl" "$TMP/u2.out" FOO=1' >/dev/null 2>&1; rr_rc=$?; set -e
-[ "$rr_rc" = 1 ] && ok "render_tpl: чужой __BOGUS__ → die rc 1" || bad "render_tpl die (rc=$rr_rc)"
+rr_out=$(gf 'render_tpl "$TMP/u2.tpl" "$TMP/u2.out" FOO=1' 2>&1); rr_rc=$?; set -e
+[ "$rr_rc" = 1 ] && grep -qF "$TMP/u2.tpl" <<<"$rr_out" \
+  && ok "render_tpl: чужой __BOGUS__ → die rc 1 + FATAL печатает ПУТЬ шаблона (fix ревью: раньше печаталась пара)" \
+  || bad "render_tpl die (rc=$rr_rc): $rr_out"
 
 echo "== 17. install happy-path (faux-bin): канон-строка podman run байт-в-байт + юниты + порядок"
-mkdir -p "$TMP/stack/models/27b"
-truncate -s 14534384640 "$TMP/stack/models/27b/qwen3.8-27b-IQ4_XS-pure.gguf"   # sparse — stat честен, диск не тратится
-truncate -s 1143006816 "$TMP/stack/models/27b/Qwen3.8-27B-DFlash2-Q4_K_M.gguf"
+mkdir -p "$TMP/stack/.data/models/27b"
+truncate -s 14534384640 "$TMP/stack/.data/models/27b/qwen3.8-27b-IQ4_XS-pure.gguf"   # sparse — stat честен, диск не тратится
+truncate -s 1143006816 "$TMP/stack/.data/models/27b/Qwen3.8-27B-DFlash2-Q4_K_M.gguf"
 gf 'write_canon 27b-single 1 262144' >/dev/null 2>&1   # канон после §14-фикстур
 : > "$FAUXLOG"; rm -f "$FAUXCNT" "$FAUXCNT.curl"
 set +e; out=$(GFCTL_FAUX_PODMAN_LOGS="$LOGOK" gf 'gpu_nodes_present(){ return 0; }
@@ -653,7 +678,7 @@ cmd_install --profile 27b-single' 2>&1); in_rc=$?; set -e
   && ok "install happy-path → rc 0 (health + smoke + автозапуск)" || { bad "install happy-path (rc=$in_rc)"; tail -5 <<<"$out"; }
 ! grep -q 'WARN: memlock' <<<"$out" \
   && ok "memlock-гейт 4.1-F2 (в): ml=unlimited → PASS без WARN" || bad "(в) unlimited дал memlock-WARN"
-CANON_RUN="podman run -d --name gufo --device /dev/kfd --device /dev/dri --group-add keep-groups --ipc=host --ulimit memlock=-1:-1 --userns=keep-id:uid=1000,gid=1000 -p 0.0.0.0:8080:8080 -v $TMP/stack/models/27b:/models:ro -v $TMP/stack/cache/27b-single:/cache ghcr.io/gufo-org/toolboxes/gufo-runtime:latest $CANON_ARGS"
+CANON_RUN="podman run -d --name gufo --device /dev/kfd --device /dev/dri --group-add keep-groups --ipc=host --ulimit memlock=-1:-1 --userns=keep-id:uid=1000,gid=1000 -p 0.0.0.0:8080:8080 -v $TMP/stack/.data/models/27b:/models:ro -v $TMP/stack/.data/cache/27b-single:/cache ghcr.io/gufo-org/toolboxes/gufo-runtime:latest $CANON_ARGS"
 grep -Fxq "$CANON_RUN" "$FAUXLOG" \
   && ok "podman run в faux-логе = канонической строке Design (байт-в-байт)" || bad "podman run ≠ канону"
 ud="$TMP/home/.config/systemd/user"
@@ -669,11 +694,11 @@ grep -q '_watchdog' "$ud/gfctl-watchdog.service" \
   && ok "watchdog-юнит: ExecStart=_watchdog" || bad "watchdog-юнит"
 # defect EXP-009: юниты несли env диспетчера → _boot/_watchdog брали дефолты
 # ($HOME/gufo) — ребут acc-инсталляции падал циклом. Рендер обязан вшить
-# реальные STACK_DIR/MODELS_BASE (харнесс §17: $TMP/stack и $TMP/stack/models).
+# реальные STACK_DIR/MODELS_BASE (харнесс §17: $TMP/stack и $TMP/stack/.data/models).
 grep -Fqx "Environment=GFCTL_DIR=$TMP/stack" "$ud/gfctl-serve.service" \
-  && grep -Fqx "Environment=GFCTL_MODELS=$TMP/stack/models" "$ud/gfctl-serve.service" \
+  && grep -Fqx "Environment=GFCTL_MODELS=$TMP/stack/.data/models" "$ud/gfctl-serve.service" \
   && grep -Fqx "Environment=GFCTL_DIR=$TMP/stack" "$ud/gfctl-watchdog.service" \
-  && grep -Fqx "Environment=GFCTL_MODELS=$TMP/stack/models" "$ud/gfctl-watchdog.service" \
+  && grep -Fqx "Environment=GFCTL_MODELS=$TMP/stack/.data/models" "$ud/gfctl-watchdog.service" \
   && ok "юниты: Environment=GFCTL_DIR/GFCTL_MODELS = реальные пути стека (defect EXP-009)" \
   || bad "юниты: Environment= не отрендерен реальными путями (defect EXP-009)"
 grep -q '^OnUnitActiveSec=1min$' "$ud/gfctl-watchdog.timer" \
@@ -729,6 +754,9 @@ set +e; ./gfctl use bogus >/dev/null 2>&1; u1_rc=$?
 [ "$u1_rc" = 1 ] && ok "use неизвестный профиль → die rc 1" || bad "use bogus (rc=$u1_rc)"
 [ "$u2_rc" = 1 ] && ok "use --sessions abc → die rc 1" || bad "use --sessions abc (rc=$u2_rc)"
 : > "$FAUXLOG"; rm -f "$FAUXCNT" "$FAUXCNT.curl"
+# fix-r1 (тест §18, рецепт tester): §17-install уже положил юниты в тот же
+# $ud — снимаем их, иначе ассерт «use ставит юниты» не ловит регрессию
+rm -f "$ud/gfctl-serve.service" "$ud/gfctl-watchdog.service" "$ud/gfctl-watchdog.timer"
 set +e; out=$(GFCTL_FAUX_PODMAN_LOGS="$LOGOK" gf 'ram_gate_line(){ printf "%s: ≥N GiB — есть 999.0: OK\n" "$1"; }
 cmd_use 27b-multi --sessions 2 --context 163840' 2>&1); us_rc=$?; set -e
 [ "$us_rc" = 0 ] && grep -q 'SMOKE: OK' <<<"$out" && ok "use happy-path → rc 0 (health+smoke)" || bad "use happy-path (rc=$us_rc)"
@@ -741,7 +769,12 @@ grep -q -- '--sessions 2 --context 163840' "$FAUXLOG" \
 grep -q '/models/Qwen3.8-27B-DFlash2-Q4_K_M.gguf' <<<"$(grep '^podman run' "$FAUXLOG" | tail -n1)" \
   && ok "use 27b-multi: @DRAFT@ → контейнерный путь /models/<draft>" || bad "use draft путь"
 ! grep -q '^systemctl' "$FAUXLOG" \
-  && ok "use: автозапуск не трогает (нет systemctl-вызовов)" || bad "use трогает автозапуск"
+  && ok "use: автозапуск не трогает (нет systemctl-вызовов; enable — только on/install)" || bad "use трогает автозапуск"
+[ -f "$ud/gfctl-serve.service" ] && [ -f "$ud/gfctl-watchdog.service" ] && [ -f "$ud/gfctl-watchdog.timer" ] \
+  && ok "use: юниты поставлены идемпотентно (лейаут 4.4: первый use ставит юниты ПОСЛЕ канона; bootstrap их не ставит)" \
+  || bad "use не поставил юниты"
+grep -Fqx "Environment=GFCTL_DIR=$TMP/stack" "$ud/gfctl-serve.service" \
+  && ok "use: юниты указывают на стек-клон (GFCTL_DIR=$TMP/stack)" || bad "use юниты GFCTL_DIR"
 set +e; out=$(GFCTL_FAUX_PODMAN_LOGS="$LOGOK" gf 'ram_gate_line(){ printf "%s: ≥N GiB — есть 999.0: OK\n" "$1"; }
 cmd_use 27b-single --no-probe' 2>&1); up_rc=$?; set -e
 [ "$up_rc" = 0 ] && grep -q 'WARN' <<<"$out" \
@@ -812,7 +845,7 @@ mv "$TMP/stack/.env.hidden" "$TMP/stack/.env"; mv "$TMP/stack/.env.keep" "$TMP/s
 set +e; out=$(GFCTL_FAUX_INSPECT=exited frun _watchdog 2>&1); wd3_rc=$?; set -e
 [ "$wd3_rc" = 0 ] && [ "$(grep -c '^podman run -d' "$FAUXLOG")" = 1 ] \
   && ok "_watchdog: без маркера + exited → ровно один run, rc 0" || bad "watchdog up (rc=$wd3_rc)"
-grep -q 'state=exited -> up' "$TMP/stack/logs/watchdog.log" \
+grep -q 'state=exited -> up' "$TMP/stack/.data/logs/watchdog.log" \
   && ok "_watchdog: событие дописано в logs/watchdog.log" || bad "watchdog.log"
 : > "$FAUXLOG"
 set +e; out=$(gf 'touch() { printf "touch %s\n" "$*" >> "$GFCTL_FAUX_LOG"; command touch "$@"; }
@@ -901,36 +934,36 @@ set +e; out=$(GFCTL_FAUX_INSPECT=running GFCTL_FAUX_PODMAN_LOGS="$LOGOK" GFCTL_F
   && ok "негатив: первый запрос пуст дважды (2 вызова) + остальные → FATAL rc 1" \
   || bad "smoke оба пустые (rc=$sm5_rc, вызовы=$(cat "$FAUXCNT.curl"))"
 
-echo "== 24. uninstall: слои; модели и образ по умолчанию живы"
+echo "== 24. uninstall v2 (лейаут 4.4): контейнер+юниты+linger+limits.d; клон и .data/ НЕ тронуты; purge-флагов больше нет"
 gf 'install_units' >/dev/null 2>&1   # юниты для слоя 2 (off в §20 их снёс)
 : > "$FAUXLOG"
 set +e; out=$(GFCTL_YES=1 frun uninstall </dev/null 2>&1); un_rc=$?; set -e
 [ "$un_rc" = 0 ] && ok "uninstall (GFCTL_YES) → rc 0" || bad "uninstall rc=$un_rc"
-[ -f "$TMP/stack/models/27b/qwen3.8-27b-IQ4_XS-pure.gguf" ] \
-  && ok "uninstall без флагов: веса на месте" || bad "весs удалены!"
-! grep -q '^podman rmi' "$FAUXLOG" && ok "uninstall без флагов: podman rmi ОТСУТСТВУЕТ" || bad "rmi был"
-[ ! -e "$TMP/stack/.env" ] && [ ! -e "$TMP/stack/cache" ] \
-  && ok "uninstall: дерево стека снесено (кроме models)" || bad "стек не снесён"
-! grep -q 'limits.d/99-gfctl-memlock.conf' "$FAUXLOG" \
-  && ok "uninstall: limits.d НЕ тронут (4.1-F2: переживает uninstall ради будущих relogin)" || bad "limits.d тронут при uninstall"
-grep -q 'sudo loginctl disable-linger' "$FAUXLOG" && ok "uninstall: linger off" || bad "linger"
-[ ! -e "$ud/gfctl-serve.service" ] && ok "uninstall: юниты удалены" || bad "юниты"
-set +e; out=$(GFCTL_YES=1 frun uninstall --purge-models --purge-image </dev/null 2>&1); un2_rc=$?; set -e
-[ "$un2_rc" = 0 ] && [ ! -e "$TMP/stack/models" ] \
-  && ok "uninstall --purge-models: база весов удалена" || bad "purge-models"
-grep -q '^podman rmi ghcr.io/gufo-org/toolboxes/gufo-runtime:latest' "$FAUXLOG" \
-  && ok "uninstall --purge-image: podman rmi в логе" || bad "purge-image"
-mkdir -p "$TMP/stack/models/27b"; truncate -s 1143006816 "$TMP/stack/models/27b/d.gguf"; printf 'GFCTL_PROFILE=27b-single\n' > "$TMP/stack/.env"
+[ -f "$TMP/stack/.data/models/27b/qwen3.8-27b-IQ4_XS-pure.gguf" ] \
+  && ok "uninstall v2: веса на месте (.data/ — инвариант, данные не удаляются)" || bad "веса удалены!"
+[ -f "$TMP/stack/.env" ] && [ -d "$TMP/stack/.data/cache" ] \
+  && ok "uninstall v2: клон не тронут (канон .env и кэш на месте — дерево = git-репо)" \
+  || bad "uninstall тронул клон!"
+! grep -q '^podman rmi' "$FAUXLOG" && ok "uninstall v2: podman rmi ОТСУТСТВУЕТ (образ не трогается)" || bad "rmi был"
+grep -q 'sudo rm -f /etc/security/limits.d/99-gfctl-memlock.conf' "$FAUXLOG" \
+  && ok "uninstall v2: limits.d-файл снят (вернётся при следующем install/use из memlock-гейта)" \
+  || bad "limits.d не снят при uninstall"
+grep -q 'sudo loginctl disable-linger' "$FAUXLOG" && ok "uninstall v2: linger off" || bad "linger"
+[ ! -e "$ud/gfctl-serve.service" ] && ok "uninstall v2: юниты удалены" || bad "юниты"
+rm -f "$TMP/stack/.gfctl-stopped"   # uninstall ставит маркер остановки — чистим для следующих секций
+set +e; out=$(GFCTL_YES=1 frun uninstall --purge-models </dev/null 2>&1); un2_rc=$?; set -e
+[ "$un2_rc" = 1 ] && grep -q 'purge-флаги упразднены' <<<"$out" && [ -d "$TMP/stack/.data/models" ] \
+  && ok "uninstall: purge-флаги упразднены (4.4) → die rc 1, .data/ цел" || bad "purge-флаги (rc=$un2_rc)"
 set +e; out=$(frun uninstall </dev/null 2>&1); un3_rc=$?; set -e
 [ "$un3_rc" = 1 ] && [ -f "$TMP/stack/.env" ] \
-  && ok "uninstall без согласия (не-TTY, без GFCTL_YES) → rc 1, НИЧЕГО не удалено" || bad "uninstall отказ (rc=$un3_rc)"
+  && ok "uninstall без согласия (не-TTY, без GFCTL_YES) → rc 1, НИЧЕГО не снято" || bad "uninstall отказ (rc=$un3_rc)"
 
 echo "== 25. status живой: роут из лога + автозапуск + версия + кэш (процесс + faux)"
 gf 'write_canon 27b-single 1 262144' >/dev/null 2>&1
-mkdir -p "$TMP/stack/models/27b"   # §24 purge-models снёс веса — восстанавливаем sparse-фикстуры
-truncate -s 14534384640 "$TMP/stack/models/27b/qwen3.8-27b-IQ4_XS-pure.gguf"
-truncate -s 1143006816 "$TMP/stack/models/27b/Qwen3.8-27B-DFlash2-Q4_K_M.gguf"
-mkdir -p "$TMP/stack/cache/27b-single"; head -c 512 /dev/urandom > "$TMP/stack/cache/27b-single/blob"
+mkdir -p "$TMP/stack/.data/models/27b"   # гарантируем sparse-фикстуры (§24 ничего не сносил — идемпотентно)
+truncate -s 14534384640 "$TMP/stack/.data/models/27b/qwen3.8-27b-IQ4_XS-pure.gguf"
+truncate -s 1143006816 "$TMP/stack/.data/models/27b/Qwen3.8-27B-DFlash2-Q4_K_M.gguf"
+mkdir -p "$TMP/stack/.data/cache/27b-single"; head -c 512 /dev/urandom > "$TMP/stack/.data/cache/27b-single/blob"
 python3 - <<'PYEOF' &
 import socket, time
 s = socket.socket()
@@ -984,7 +1017,7 @@ mapfile -t pruns < <(grep '^podman run' "$FAUXLOG")
 [ "${#pruns[@]}" = 2 ] && [[ ${pruns[0]} == *'--context 196608'* ]] && [[ ${pruns[1]} == *'--context 163840'* ]] \
   && ok "лестница по порядку: --context 196608 затем 163840; РОВНО 2 run (успех без второго recreate)" \
   || bad "run-линии probe: $(grep -c '^podman run' "$FAUXLOG") шт"
-J26="$TMP/stack/logs/probe-27b-multi-2.log"
+J26="$TMP/stack/.data/logs/probe-27b-multi-2.log"
 grep -q 'ступень 196608: попытка загрузки (sessions 2)' "$J26" && grep -q 'ступень 196608: ОТКАЗ — load_failed' "$J26" \
   && grep -q 'ступень 163840: OK — канон' "$J26" && ! grep -q 'ступень 131072' "$J26" \
   && ok "журнал попыток: обе ступени с вердиктами; 131072 не достигнута (успех раньше)" || bad "журнал probe (26)"
@@ -1009,8 +1042,8 @@ grep -q '^GFCTL_CONTEXT=163840$' "$TMP/stack/.env" && grep -q '^GFCTL_CTX_27b_mu
 [ "$(grep -c '^podman run' "$FAUXLOG")" = 1 ] && grep '^podman run' "$FAUXLOG" | grep -q -- '--context 196608' \
   && ok "лестница СТОП после факта: ровно 1 run (--context 196608), меньшие ступени не запускались" \
   || bad "лестница продолжилась после факта (26b)"
-grep -q 'ступень 196608: движок поднял фактический 163840 — принимаю факт' "$TMP/stack/logs/probe-27b-multi-2.log" \
-  && ! grep -q 'ступень 163840' "$TMP/stack/logs/probe-27b-multi-2.log" \
+grep -q 'ступень 196608: движок поднял фактический 163840 — принимаю факт' "$TMP/stack/.data/logs/probe-27b-multi-2.log" \
+  && ! grep -q 'ступень 163840' "$TMP/stack/.data/logs/probe-27b-multi-2.log" \
   && ok "журнал попыток: обе цифры записаны; попытки 163840 НЕ было (стоп)" || bad "журнал урезания (26b)"
 grep -q 'канон записан: профиль 27b-multi, sessions 2, context 163840' <<<"$out" \
   && ok "печать канона показывает ФАКТ 163840" || bad "печать канона (26b)"
@@ -1029,11 +1062,11 @@ mapfile -t fruns < <(grep '^podman run' "$FAUXLOG")
 [ "${#fruns[@]}" = 3 ] && [[ ${fruns[0]} == *'--context 262144'* ]] && [[ ${fruns[1]} == *'--context 229376'* ]] \
   && [[ ${fruns[2]} == *'--context 196608'* ]] \
   && ok "flash-лестница по порядку: 262144 → 229376 → 196608; ровно 3 run" || bad "flash run-линии"
-[ "$(grep -c 'ОТКАЗ' "$TMP/stack/logs/probe-flash-multi-2.log")" = 2 ] \
+[ "$(grep -c 'ОТКАЗ' "$TMP/stack/.data/logs/probe-flash-multi-2.log")" = 2 ] \
   && ok "журнал flash: 2 отказа + OK (первая загрузившаяся = канон)" || bad "журнал flash (27)"
 
 echo "== 28. probe полный отказ → die с таблицей попыток; .env НЕ испорчен; sessions=4 → подсказка 65536"
-printf 'GFCTL_PROFILE=27b-single\nGFCTL_SESSIONS=1\nGFCTL_CONTEXT=262144\nGFCTL_PORT=8080\nGFCTL_BIND=0.0.0.0\nGFCTL_MODELS=%s\nGFCTL_IMAGE=x\n' "$TMP/stack/models" > "$TMP/stack/.env"
+printf 'GFCTL_PROFILE=27b-single\nGFCTL_SESSIONS=1\nGFCTL_CONTEXT=262144\nGFCTL_PORT=8080\nGFCTL_BIND=0.0.0.0\nGFCTL_MODELS=%s\nGFCTL_IMAGE=x\n' "$TMP/stack/.data/models" > "$TMP/stack/.env"
 cp "$TMP/stack/.env" "$TMP/env.before"
 rm -f "$FAUXCNT.ctx"; : > "$FAUXLOG"
 set +e
@@ -1051,7 +1084,7 @@ cmp -s "$TMP/stack/.env" "$TMP/env.before" \
   && ok "отказ probe НЕ портит .env (ни пар-ключа, ни полей — свойство отката)" || bad ".env испорчен отказом"
 [ "$(grep -c '^podman run' "$FAUXLOG")" = 3 ] \
   && ok "полный отказ: ровно 3 попытки (лестница целиком)" || bad "число попыток (28)"
-grep -q '^  лог: .*event=load_failed reason=oom' "$TMP/stack/logs/probe-27b-multi-2.log" \
+grep -q '^  лог: .*event=load_failed reason=oom' "$TMP/stack/.data/logs/probe-27b-multi-2.log" \
   && ok "журнал probe: хвост движкового лога дописан после отказа (4.2 п.2)" || bad "журнал без хвоста лога (28)"
 set +e
 out=$(GFCTL_LOADFAIL_AFTER=0 \
@@ -1061,7 +1094,7 @@ $NO_W
 cmd_use flash-multi --sessions 4" 2>&1); pa4_rc=$?; set -e
 [ "$pa4_rc" = 1 ] && grep -q -- '--context 65536' <<<"$out" \
   && ok "sessions=4 полный отказ: die + подсказка --context 65536 (OQ-2a)" || bad "sessions4 отказ (rc=$pa4_rc)"
-[ "$(grep -c 'ОТКАЗ' "$TMP/stack/logs/probe-flash-multi-4.log")" = 5 ] \
+[ "$(grep -c 'ОТКАЗ' "$TMP/stack/.data/logs/probe-flash-multi-4.log")" = 5 ] \
   && ok "журнал sessions=4: все 5 ступеней лестницы с отказами" || bad "журнал sessions4 (28)"
 
 echo "== 29. повторный use с каноном пары = ровно ОДНА загрузка, пере-перебора нет"
@@ -1223,7 +1256,7 @@ else
 fi
 [ "$(grep -c '^podman run -d' "$FAUXLOG")" = 1 ] \
   && ok "рестарт: ровно один container_up (канон, без дублей)" || bad "podman run в agent-check"
-[ -e "$TMP/stack/logs/agent-check-restore.json" ] \
+[ -e "$TMP/stack/.data/logs/agent-check-restore.json" ] \
   && bad "state-файл restore НЕ удалён после использования" || ok "state-файл restore удалён после использования"
 [ "$(grep -c '/metrics' "$FAUXLOG")" = 0 ] \
   && ok "agent-check: /metrics не дёргается (тайминги из тела ответа)" || bad "agent-check трогает /metrics"
@@ -1310,7 +1343,7 @@ if [ -n "$i_wr" ] && [ -n "$i_rm" ] && [ "${#cchat[@]}" = 3 ] \
 else
   bad "порядок verify: warn=$i_wr rm=$i_rm chat2=${cchat[1]:-?} chat3=${cchat[2]:-?}"
 fi
-[ -e "$TMP/stack/logs/cache-verify.json" ] \
+[ -e "$TMP/stack/.data/logs/cache-verify.json" ] \
   && bad "state cache-verify.json НЕ удалён" || ok "state cache-verify.json удалён после использования"
 : > "$FAUXLOG"; rm -f "$FAUXCNT.curl"
 set +e
@@ -1391,18 +1424,19 @@ qs_n=$(grep -c . <<<"$qs_cmds")
 qs_ok=1
 while IFS= read -r line; do
   case "$line" in
+    ./gfctl\ *)
+      qcmd=${line#./gfctl }; qcmd=${qcmd%% *}
+      grep -q "^  $qcmd)" gfctl || { bad "README: команды '$qcmd' нет в роутере gfctl"; qs_ok=0; } ;;
     gfctl\ *)
       qcmd=${line#gfctl }; qcmd=${qcmd%% *}
       grep -q "^  $qcmd)" gfctl || { bad "README: команды '$qcmd' нет в роутере gfctl"; qs_ok=0; } ;;
-    ./install.sh*)
-      [ -f install.sh ] || { bad "README: install.sh нет в репо"; qs_ok=0; } ;;
     git\ clone*)
       command -v git >/dev/null || { bad "README: git недоступен"; qs_ok=0; } ;;
     *)
       bad "README: нераспознанная строка quickstart: $line"; qs_ok=0 ;;
   esac
 done <<<"$qs_cmds"
-[ "$qs_ok" = 1 ] && ok "README quickstart: все команды существуют (git / install.sh / роутер gfctl)"
+[ "$qs_ok" = 1 ] && ok "README quickstart: все команды существуют (git clone + ./gfctl use/status/watch)"
 
 echo "== 39. doctor: блок «соседние артефакты» — детерминизм на пустом HOME + обнаружение"
 for a in gufo-models gufo-exp halogen-models halogen-cache gfctl-acc gfctl-acc-src gfctl-acc-models; do
@@ -1413,10 +1447,10 @@ doct=$(gf 'cmd_doctor')
   && ok "doctor на пустом HOME: все 7 «не обнаружен» (детерминизм)" \
   || bad "doctor: «не обнаружен»=$(grep -c ': не обнаружен' <<<"$doct") (ждём 7)"
 [ "$(grep -c ': обнаружен' <<<"$doct")" = 0 ] && ok "doctor: ложных «обнаружен» нет" || bad "doctor: ложные обнаружения"
-grep -q 'uninstall НЕ трогает никогда' <<<"$doct" && grep -q '~/halogen-cache' <<<"$doct" \
-  && ok "doctor: приписка «uninstall НЕ трогает никогда» (gufo-models/halogen-*)" || bad "doctor: приписки нетронутых нет"
-grep -q -- '--purge-models' <<<"$doct" \
-  && ok "doctor: приписка ~/gfctl-acc-models — только с --purge-models" || bad "doctor: приписки purge нет"
+grep -q 'uninstall (v2, 4.4) не трогает НИКАКИЕ данные' <<<"$doct" \
+  && ok "doctor: приписка uninstall-v2 «не трогает НИКАКИЕ данные»" || bad "doctor: приписки uninstall-v2 нет"
+! grep -q -- '--purge-models' <<<"$doct" \
+  && ok "doctor: purge-упоминаний больше нет (флаги упразднены, 4.4)" || bad "doctor: purge-приписка осталась"
 for a in gufo-models gufo-exp halogen-models halogen-cache gfctl-acc gfctl-acc-src gfctl-acc-models; do
   mkdir -p "$TMP/home/$a"
 done
@@ -1463,29 +1497,23 @@ cmd_install --profile 27b-single" 2>&1); idd_rc=$?; set -e
   && ok "install на dead: ровно один recreate (run=1)" \
   || bad "dead: run=$(grep -c '^podman run' "$FAUXLOG")"
 
-echo "== 41. uninstall границы: ~/gfctl-acc{,-src} удаляются; acc-models — только --purge-models; gufo/halogen НИКОГДА"
+echo "== 41. uninstall v2 границы: НИЧЕГО вне юнитов/контейнера/linger/limits.d — acc-каталоги и пулы ~/gufo-models ~/gufo-exp ~/halogen-* не тронуты"
 printf 'x' > "$TMP/home/gfctl-acc/gfctl"; printf 'x' > "$TMP/home/gfctl-acc-src/install.sh"
 printf 'x' > "$TMP/home/gfctl-acc-models/w.gguf"; printf 'x' > "$TMP/home/gufo-models/keep.gguf"
 gf 'install_units' >/dev/null 2>&1   # юниты для слоя 2
 : > "$FAUXLOG"
 set +e; out=$(GFCTL_YES=1 frun uninstall </dev/null 2>&1); ub_rc=$?; set -e
 [ "$ub_rc" = 0 ] && ok "uninstall с faux-артефактами → rc 0" || bad "uninstall границы rc=$ub_rc"
-[ ! -e "$TMP/home/gfctl-acc" ] && [ ! -e "$TMP/home/gfctl-acc-src" ] \
-  && ok "uninstall без флагов: ~/gfctl-acc{,-src} удалены (приёмочные)" || bad "acc-каталоги не удалены"
-[ -e "$TMP/home/gfctl-acc-models" ] \
-  && ok "uninstall без флагов: ~/gfctl-acc-models НЕ удалён (только --purge-models)" || bad "acc-models удалён БЕЗ флага!"
+[ -e "$TMP/home/gfctl-acc/gfctl" ] && [ -e "$TMP/home/gfctl-acc-src/install.sh" ] \
+  && [ -e "$TMP/home/gfctl-acc-models/w.gguf" ] \
+  && ok "uninstall v2: приёмочные ~/gfctl-acc{,-src,-models} НЕ тронуты (слоёный снос упразднён)" \
+  || bad "uninstall задел acc-каталоги!"
 [ -e "$TMP/home/gufo-models/keep.gguf" ] && [ -e "$TMP/home/gufo-exp" ] \
   && [ -e "$TMP/home/halogen-models" ] && [ -e "$TMP/home/halogen-cache" ] \
-  && ok "uninstall: ~/gufo-models ~/gufo-exp ~/halogen-* НЕ тронуты (DoD)" || bad "чужие артефакты пострадали!"
-grep -q 'остались нетронутыми' <<<"$out" && grep -q '~/gufo-models' <<<"$out" && grep -q '~/halogen-cache' <<<"$out" \
-  && ok "uninstall: список «остались нетронутыми» напечатан в конце" || bad "списка нетронутых нет в выводе"
+  && ok "uninstall v2: ~/gufo-models ~/gufo-exp ~/halogen-* НЕ тронуты (данные — инвариант)" \
+  || bad "чужие артефакты пострадали!"
 ! grep -q '^podman rmi' "$FAUXLOG" \
-  && ok "uninstall без --purge-image: podman rmi ОТСУТСТВУЕТ" || bad "rmi без флага"
-set +e; out=$(GFCTL_YES=1 frun uninstall --purge-models </dev/null 2>&1); um_rc=$?; set -e
-[ "$um_rc" = 0 ] && [ ! -e "$TMP/home/gfctl-acc-models" ] \
-  && ok "uninstall --purge-models: ~/gfctl-acc-models удалён" || bad "purge-models: acc-models остался (rc=$um_rc)"
-[ -e "$TMP/home/gufo-models/keep.gguf" ] \
-  && ok "--purge-models: ~/gufo-models по-прежнему нетронут" || bad "purge-models задел gufo-models!"
+  && ok "uninstall v2: podman rmi ОТСУТСТВУЕТ (образ — руками)" || bad "rmi был"
 
 # ══ 4.1-F1: зеркало весов (GFCTL_MIRROR_BASE): mirror-first / фоллбэк / doctor ══
 
@@ -1596,7 +1624,7 @@ mapfile -t ipruns < <(grep '^podman run' "$FAUXLOG")
 [ "${#ipruns[@]}" = 2 ] && [[ ${ipruns[0]} == *'--context 196608'* ]] && [[ ${ipruns[1]} == *'--context 163840'* ]] \
   && ok "install-probe лестница по порядку: 196608 fail → 163840 ok; РОВНО 2 run (успех без recreate)" \
   || bad "install-probe run-линии: $(grep -c '^podman run' "$FAUXLOG")"
-grep -q 'ступень 163840: OK — канон' "$TMP/stack/logs/probe-27b-multi-2.log" \
+grep -q 'ступень 163840: OK — канон' "$TMP/stack/.data/logs/probe-27b-multi-2.log" \
   && ok "install-probe: журнал попыток ведётся" || bad "install-probe журнал"
 n_ip1=$(grep -c '^podman run' "$FAUXLOG")
 set +e
@@ -1616,7 +1644,7 @@ $NO_W
 gpu_nodes_present(){ return 0; }
 ulimit(){ echo unlimited; }
 cmd_install --profile 27b-single" 2>&1); ip3_rc=$?; set -e
-[ "$ip3_rc" = 0 ] && ! grep -q 'probe-подбор' <<<"$out" && [ ! -e "$TMP/stack/logs/probe-27b-single-1.log" ] \
+[ "$ip3_rc" = 0 ] && ! grep -q 'probe-подбор' <<<"$out" && [ ! -e "$TMP/stack/.data/logs/probe-27b-single-1.log" ] \
   && ok "install single: probe нет (лестница '-')" || bad "install single probe (rc=$ip3_rc)"
 
 echo "== 44. status --json + smoke: экранирование спецсимволов (4.2 п.6; 4.3 п.3/п.4)"

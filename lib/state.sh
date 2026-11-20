@@ -1,5 +1,5 @@
 # shellcheck shell=bash
-# ── канон профиля: ~/gufo/.env (SPEC §4: boot-юнит и вотчдог поднимают
+# ── канон профиля: $STACK_DIR/.env (SPEC §4: boot-юнит и вотчдог поднимают
 # канон, ничего не пересчитывая) ─────────────────────────────────────────────
 # Формат canon: KEY=VALUE построчно (grep-парсинг, как cur_profile 1.1).
 # Ключи: GFCTL_PROFILE, GFCTL_SESSIONS, GFCTL_CONTEXT, GFCTL_PORT, GFCTL_BIND,

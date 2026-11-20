@@ -26,7 +26,10 @@
 #     amdgpu — штатно: cmd_boot ждёт GPU-ноды (бюджет 420 с, попытка
 #     каждые 10 с; исчерпание → Restart=on-failure RestartSec=30), поэтому
 #     ожидание готовности 3–10 мин — норма, а не подвисание; фаза verify
-#     ждёт статус в wait-loop до 12 мин.
+#     ждёт статус в wait-loop до 12 мин;
+#   - 2026-11-20 (лейаут 4.4): стек = клон ~/gfctl — GFCTL_DIR/GFCTL_MODELS
+#     не задаются (диспетчер сам детектит каталог gfctl-файла); логи
+#     watchdog — ~/gfctl/.data/logs/watchdog.log.
 #
 # ВАЖНО: скрипт НЕ УМЕЕТ РЕБУТИТЬ и не переживает ребут — он двухфазный
 # чек-лист для ручной приёмки с пользователем у машины. ЭТА ЗАГОТОВКА В
@@ -88,7 +91,7 @@ case "$PHASE" in
     echo "== EXP-009 фаза 1 (prep): hfctl off под ai → linger → gfctl on ($(date -Is))"
     $SSH "$GF_ACC_USER@$GF_ACC_HOST" 'bash -s' <<'REMOTE' || {
       set -u
-      GFCTL_DIR="$HOME/gfctl-acc" GFCTL_MODELS="$HOME/gfctl-acc-models" GF="$GFCTL_DIR/gfctl"
+      GF="$HOME/gfctl/gfctl"
       echo "== hfctl-прод: гасим ОТ ИМЕНИ ai (юниты disabled → после ребута не встанет; RAM остаётся gufo)"
       if command -v hfctl >/dev/null 2>&1; then
         hfctl off || exit 41
@@ -132,11 +135,11 @@ CHECKLIST
     echo "== EXP-009 фаза 2: сервер сам healthy после ребута ($(date -Is))"
     $SSH "$GF_ACC_USER@$GF_ACC_HOST" 'bash -s' <<'REMOTE' || {
       set -u
-      GFCTL_DIR="$HOME/gfctl-acc" GFCTL_MODELS="$HOME/gfctl-acc-models" GF="$GFCTL_DIR/gfctl"
+      GF="$HOME/gfctl/gfctl"
       echo "== юниты после ребута (подъём рук. командами = 0: только смотрим)"
       systemctl --user is-active gfctl-serve.service || true
       systemctl --user is-active gfctl-watchdog.timer || true
-      tail -5 "$HOME/gufo/logs/watchdog.log" 2>/dev/null || true
+      tail -5 "$HOME/gfctl/.data/logs/watchdog.log" 2>/dev/null || true
       echo "== wait-loop до 12 мин: boot ждёт GPU-ноды (до 7 мин) + загрузка модели"
       ok=""
       for i in $(seq 1 36); do

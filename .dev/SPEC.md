@@ -10,8 +10,9 @@
 ## 1 · Цели и принципы
 
 1. Путь новичка — **4 команды от клонирования до работающего gufo-сервера
-   с автозапуском** (`git clone`/копия → `./install.sh` → `gfctl install` →
-   проверка).
+   с автозапуском** (`git clone && cd gfctl` → `./gfctl use <профиль>` →
+   проверка; лейаут 4.4: install.sh упразднён, bootstrap первого запуска —
+   сам диспетчер).
 2. **Три именованных профиля**: `27b-single`, `27b-multi`, `flash-multi`
    (flash-соло удалён решением пользователя 2026-11-17 — flash используется
    только под параллельные агентов с максимальными контекстами).
@@ -28,28 +29,34 @@
    максимум** (probe-лестница) так, чтобы на RAM-кэш остались зарезервированные
    гигабайты; найденное значение кэшируется в профиле.
 
-## 2 · Дистрибуция и первичная установка
+## 2 · Дистрибуция и первичная установка (лейаут 4.4)
 
-**Дистрибуция — локальная** (публикация на GitHub не планируется):
-перенос каталога репо на целевую машину (`rsync -a` / `scp -r` / git-remote
-на LAN), затем:
+**Дистрибуция — git-клон** (локально: rsync/scp/git по LAN или GitHub),
+клон = стек = место запуска:
 
 ```bash
 cd gfctl
-./install.sh              # дерево gfctl в ~/gufo/ + симлинк ~/.local/bin/gfctl
-gfctl install             # preflight → веса → юниты → старт → health → smoke → автозапуск
+./gfctl use 27b-single    # bootstrap .data/ → веса → юниты → старт → health → smoke
+gfctl status              # проверка
 ```
 
-- `install.sh` — только bootstrap (запуск вне дерева — отказ rc 1);
-  повтор = обновление (перезаписывает ровно `gfctl`+`lib/`+`tpl/`).
-- Вся инсталляция в `~/gufo/`: диспетчер + `lib/` + `tpl/`, модели
-  `~/gufo/models/<сет>/`, кэш `~/gufo/cache/<профиль>/`, маркер
-  `.gfctl-stopped`, `.env` (`GFCTL_PROFILE` — канон профиля), логи.
-- Вне каталога: systemd-user юниты `gfctl-serve.service` (oneshot,
-  ExecStart=`gfctl _boot`) + `gfctl-watchdog.service/.timer` (1 мин) —
-  отдельного boot-юнита нет (решение 1.2: serve-юнит сам поднимает канон),
-  образ ghcr,
-  `limits.d/99-gfctl-memlock.conf`, группа render, linger.
+- `STACK_DIR` = каталог gfctl-файла (`readlink -f`; запуск из любого
+  подкаталога клона; `GFCTL_DIR` переопределяет). `install.sh` упразднён
+  (4.4): bootstrap первого запуска — сам диспетчер (любой вызов создаёт
+  каркас `.data/`, юниты НЕ ставит).
+- Вся инсталляция в клоне: диспетчер + `lib/` + `tpl/`; данные — в
+  `.data/` (вне git): модели `.data/models/<сет>/`, кэш
+  `.data/cache/<профиль>/`, логи `.data/logs/`; канон `.env` и маркер
+  `.gfctl-stopped` — в корне клона. `.gitignore` репо игнорит `.data/` и
+  `logs/` → `git clean -fd` безопасен; **`git clean -fdx` запрещён**
+  (удалит данные; bootstrap при нарушении `.gitignore` печатает warn).
+- Вне каталога (исключения инварианта): systemd-user юниты
+  `gfctl-serve.service` (oneshot, ExecStart=`gfctl _boot`) +
+  `gfctl-watchdog.service/.timer` (1 мин) — отдельного boot-юнита нет
+  (решение 1.2: serve-юнит сам поднимает канон), образ ghcr,
+  `limits.d/99-gfctl-memlock.conf`, группа render, linger. Юниты ставятся
+  при первом `use`/`install` (после записи канона, идемпотентно);
+  enable/linger — только `on`/`install`.
 
 ## 3 · Карта команд
 
@@ -67,11 +74,11 @@ gfctl install             # preflight → веса → юниты → старт
 | `gfctl cache [--verify]` | Сводка кэша из логов (configured/skipped/evicted) + `/metrics` cached_total; `--verify` — контрольный follow-up + рестарт-проба |
 | `gfctl doctor` | Диагностика без записи: ОС, /dev/kfd, render-группа, memlock, linger, RAM-гейты всех профилей (цифрами), диск под веса, порт, **gpu-lock** (кто держит /dev/kfd — предупреждение о hfctl-проде) |
 | `gfctl models [--check-types]` | Скачано vs требуется по профилям, sha-статус, свободное место; `--check-types [сет|профиль]` — pre-check GGUF-типов (низкобитные IQ — IQ1_S/IQ1_M/IQ2_*/IQ3_XXS —, BF16/MXFP4/неизвестные в FFN → КРАСНЫЙ «не загрузится»; display-имена — канон ggml enum, BF16=30 — F20, 4.2; 41/42=Q1_0/Q2_0 — форк движка (ggml.h:431–432, 4.3); лишние аргументы → die) |
-| `gfctl uninstall [--purge-models] [--purge-image]` | Слоёная зачистка: контейнер, юниты, `~/gufo` (модели щадятся по умолчанию); `limits.d/99-gfctl-memlock.conf` НЕ трогается (4.1-F2: безвреден, переживает uninstall ради будущих relogin) |
+| `gfctl uninstall` | v2 (лейаут 4.4): снимает контейнер + юниты + watchdog + linger + `limits.d/99-gfctl-memlock.conf`; данные (`.data/` — модели/кэш/логи) и podman-образ НЕ трогает (данные — инвариант; purge-флаги упразднены — полный снос руками: `rm -rf` клона + `podman rmi`). «Слоёный» снос дерева `~/gufo` и приёмочных `~/gfctl-acc*` упразднён |
 
 ## 4 · Модель состояний
 
-1. **Профиль** (`install --profile` / `use`) — канон в `~/gufo/.env`
+1. **Профиль** (`install --profile` / `use`) — канон в `<клон>/.env`
    (`GFCTL_PROFILE` + зафиксированный sessions/context); boot-юнит и
    вотчдог поднимают его, ничего не пересчитывая.
 2. **Вкл/выкл** (`on`/`off`) — autostart + linger; `off` ставит маркер
