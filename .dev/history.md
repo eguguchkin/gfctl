@@ -67,3 +67,16 @@
   dest/.part удалены (самовосстановление 4.2), rc=1 — формулировка fix-r1 подтверждена живьём.
   EXP-011 — SKIP по обоснованию скрипта (живых имён с кавычками нет — F20; гонять только
   при появлении такого носителя в load-логе). EXP-хвосты 4.3 закрыты.
+- **Окно 2026-11-21 закрыто: миграция лейаут v2 живьём на ОБЕИХ машинах + fix-r2.**
+  evo: чистая установка с нуля (download IQ4_XS-pure 13.5 GiB @107 MiB/с, SHA OK,
+  загрузка 95 с, SMOKE OK, канон 27b-single записан, agent-check PASS=4 WARN=0,
+  рестарт-restore reuse=disk). FAEX: agent-check PASS=4 (сессия 14.5 s лучше
+  референса 17.2), рестарт-restore поверх живого контейнера — «already in use»
+  0 вхождений (fix-r2 rm-в-попытке принят живьём). Ребут-приёмки: FAEX 02:54 —
+  hipfire-прод сам поднялся (победил RAM-конфликт, gufo корректно Exited(0) —
+  штатный возврат окна); evo — инцидент (см. llm-lab GOTCHAS: card1→card0 +
+  рассинхрон реестров podman) → прод восстановлен healthy 27b-single mq4-xts,
+  smoke dflash:true. fix-r2 (enable при install_units): цикл tester PASS 367/0
+  → reviewer CHANGES_REQUESTED → round 3 (SPEC §2/AGENTS контракт, enable
+  3→2 юнита) → APPROVED → b0d8ca8 запушен, клоны FAEX+evo на HEAD, проды 200.
+  До живого ребут-приёма fix-r2 юниты на машинах на ручном enable --now.
