@@ -26,7 +26,9 @@
 # Финальная строка файла: RESULT: PASS|FAIL|SKIP — …
 
 set -u
-LOG="$("${GFCTL:-gfctl}" logs 2>/dev/null | grep 'event=load_completed' | tail -1)"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+GFCTL="${GFCTL:-$SCRIPT_DIR/../../gfctl}"   # лейаут 4.4: бинарника в PATH нет — клон-относительный путь
+LOG="$("$GFCTL" logs 2>/dev/null | grep 'event=load_completed' | tail -1)"
 [ -n "$LOG" ] || { echo "RESULT: SKIP — живого load_completed нет (стек не поднят?)"; exit 0; }
 MODEL="${LOG##*model=}"; MODEL="${MODEL%% *}"
 echo "живое имя модели: '$MODEL'"
