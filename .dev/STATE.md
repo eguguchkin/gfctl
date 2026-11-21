@@ -126,6 +126,21 @@ ready 200). Найден и закрыт продуктовый баг: `gfctl l
 EXP-014/015 повтор → reviewer скоп-лимитед на фиксы окна. EXP-013 bare —
 deferred (D8).
 
+## ОКНО EVO — ЗАВЕРШЕНО (reviewer APPROVED, 2026-11-22)
+
+- Reviewer скоп-лимитед (window round 2): **APPROVED**, blocking нет. cmd_off
+  `disable --now` — верен (повторный ExecStop безвреден, батарея 400/0),
+  EXP-011 клон-относителен ✓, И2-честность EXP-014-evo подтверждена,
+  дельта окна = ровно 1 строка lib + EXP-011 (scope creep нет).
+- Non-critical backlog: cmd_uninstall тот же зомби-класс (commands.sh:1221,
+  однострочно при касании); §off-ассерт «--now»; контракт-комментарий cmd_off;
+  hfctl off зомби-класс (hfctl/lib/autostart.sh:224 — заметка в hfctl-бэклог
+  llm-lab); F27 гард-атрибуция — сверить при синке hfctl-клона.
+- Хвосты этапа 5 (backlog, при следующем касании evo): EXP-014 чистый реран
+  (gfctl on → EXP-014, ~6 мин), EXP-013 bare (ресурс не выделен, D8).
+
+## ЭТАП 5: ЗАКРЫТ (2026-11-22). Обе машины: hfctl-прод healthy, linger=yes.
+
 ## ОКНО EVO (ночь 2026-11-21/22, GO пользователя) — в финале
 
 - **EXP-015 PASS** (27b-single: dflash2/1/262144; slirp-скоуп жив, recreate
