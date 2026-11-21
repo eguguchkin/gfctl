@@ -103,7 +103,7 @@ cmd_off() {
   mkdir -p "$STACK_DIR"
   touch "$STOP_MARKER"
   container_stop
-  systemctl --user disable "$UNIT_NAME-serve.service" "$UNIT_NAME-watchdog.timer" 2>/dev/null || true
+  systemctl --user disable --now "$UNIT_NAME-serve.service" "$UNIT_NAME-watchdog.timer" 2>/dev/null || true
   rm -f "$UNIT_DIR/$UNIT_NAME-serve.service" \
         "$UNIT_DIR/$UNIT_NAME-watchdog.service" \
         "$UNIT_DIR/$UNIT_NAME-watchdog.timer"
