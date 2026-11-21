@@ -48,8 +48,8 @@ CONF="$GF/.gfctl-containers.conf"
 say()  { echo "### $*"; }
 fail() { echo "### FAIL: $*"; echo "RESULT: FAIL — $*"; exit 1; }
 rd()   { echo "--- $* (чтение)"; }
-pasta_ct()   { pgrep -c pasta 2>/dev/null || echo 0; }
-slirp_ct()   { pgrep -c slirp4netns 2>/dev/null || echo 0; }
+pasta_ct()   { pgrep -c pasta 2>/dev/null || true; }
+slirp_ct()   { pgrep -c slirp4netns 2>/dev/null || true; }
 
 say "EXP-015 start $(date '+%F %T') на $(hostname)"
 # ── bootstrap (F21/И3) ───────────────────────────────────────────────────────
@@ -64,8 +64,8 @@ PASTA0=$(pasta_ct); SLIRP0=$(slirp_ct)
 say "базовая линия: pasta=$PASTA0 slirp=$SLIRP0 (hfctl-прод под pasta)"
 [ -f "$CONF" ] || fail "нет $CONF — скоуп-файл не доставлен bootstrap'ом (запусти ./gfctl once перед EXP)"
 rd "graphRoot без env (глобальный) и с env gfctl (скоуп) — ждём ИДЕНТИЧНЫЕ (в)"
-GR_NOENV=$(podman info --format '{{.store.graphRoot}}' 2>/dev/null)
-GR_ENV=$(CONTAINERS_CONF="$CONF" podman info --format '{{.store.graphRoot}}' 2>/dev/null)
+GR_NOENV=$(podman info --format '{{.Store.GraphRoot}}' 2>/dev/null)
+GR_ENV=$(CONTAINERS_CONF="$CONF" podman info --format '{{.Store.GraphRoot}}' 2>/dev/null)
 echo "graphRoot без env: $GR_NOENV"; echo "graphRoot с env:   $GR_ENV"
 [ -n "$GR_NOENV" ] && [ "$GR_NOENV" = "$GR_ENV" ] || fail "graphRoot разошёлся ($GR_NOENV ≠ $GR_ENV) — скоуп создал второе хранилище"
 
@@ -106,7 +106,7 @@ rd "(б) journalctl пользователя за окно прогона"
 journalctl --user --since "10 min ago" 2>/dev/null | grep -ci 'kill network process' \
   || echo "  0 вхождений «kill network process» (чисто)"
 rd "(в) graphRoot повторно (после recreate) — идентичность хранилища"
-GR_ENV2=$(CONTAINERS_CONF="$CONF" podman info --format '{{.store.graphRoot}}' 2>/dev/null)
+GR_ENV2=$(CONTAINERS_CONF="$CONF" podman info --format '{{.Store.GraphRoot}}' 2>/dev/null)
 [ "$GR_ENV2" = "$GR_NOENV" ] || fail "(в) graphRoot разошёлся после recreate ($GR_NOENV ≠ $GR_ENV2)"
 
 # ── шаг 5: обратный hfctl on (г) ─────────────────────────────────────────────
@@ -115,10 +115,10 @@ bash "$GF/gfctl" off || fail "gfctl off rc≠0"
 OUT3=$(bash "$HF/hfctl" on 2>&1) || fail "hfctl on rc≠0: $OUT3"
 grep -qi 'already in use' <<<"$OUT3" && fail "(г) «already in use» в hfctl on"
 for i in $(seq 1 60); do
-  curl -fsS "http://127.0.0.1:$HF_PORT/ready" >/dev/null 2>&1 && break
+  curl -fsS "http://127.0.0.1:$HF_PORT/health" >/dev/null 2>&1 && break
   sleep 5
 done
-curl -fsS "http://127.0.0.1:$HF_PORT/ready" >/dev/null || fail "(г) hfctl /ready не ответил за 300 с"
+curl -fsS "http://127.0.0.1:$HF_PORT/health" >/dev/null || fail "(г) hfctl /ready не ответил за 300 с"
 LING=$(loginctl show-user "$(id -un)" -p Linger | cut -d= -f2)
 [ "$LING" = "yes" ] || fail "linger=$LING после hfctl on (F11 нарушен)"
 PASTA2=$(pasta_ct)

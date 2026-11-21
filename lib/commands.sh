@@ -852,9 +852,9 @@ cmd_logs() {
   for a in "$@"; do case "$a" in -f) ;; *) tail_n="$a" ;; esac; done
   [ "$(container_state)" = missing ] && die "контейнера $CONTAINER нет — подними: gfctl up (или install/use)"
   if [ -n "$follow" ]; then
-    podman logs -f --tail "${tail_n:-100}" "$CONTAINER"
+    podman logs -f --tail "${tail_n:-100}" "$CONTAINER" 2>&1
   else
-    podman logs --tail "${tail_n:-100}" "$CONTAINER"
+    podman logs --tail "${tail_n:-100}" "$CONTAINER" 2>&1
   fi
 }
 

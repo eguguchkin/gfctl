@@ -126,7 +126,7 @@ ren_tail=${REN#*\[логи\] }          # «HH:MM:SS <хвост строки>»
 ren_ts=${ren_tail:0:8}
 tail_txt=${ren_tail:9}
 if [[ "$ren_ts" =~ ^[0-9]{2}:[0-9]{2}:[0-9]{2}$ ]] && [ -n "$tail_txt" ]; then
-  RAW=$(podman logs --tail 200 "$CONTAINER" 2>&1 | grep -F -- "$tail_txt" | tail -1)
+  RAW=$(podman logs --tail 200 "$CONTAINER" 2>&1 | grep -F -- "$tail_txt" | while IFS= read -r l; do t=${l:0:19}; [ "$(date -d "$t UTC" +%H:%M:%S 2>/dev/null)" = "$ren_ts" ] && { printf '%s\n' "$l"; break; }; done)
   raw_ts=$(sed -En 's/^([0-9]{4}-[0-9]{2}-[0-9]{2} [0-9]{2}:[0-9]{2}:[0-9]{2}).*/\1/p' <<<"$RAW")
   echo "LOG: сырая строка движка: $RAW"
   if [ -n "$raw_ts" ]; then
