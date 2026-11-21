@@ -80,10 +80,10 @@ say "$OUT"
 
 say "шаг 3: wait-health hfctl (до 300 с, только curl)"
 for i in $(seq 1 60); do
-  curl -fsS "http://127.0.0.1:$HF_PORT/ready" >/dev/null 2>&1 && break
+  curl -fsS "http://127.0.0.1:$HF_PORT/health" >/dev/null 2>&1 && break
   sleep 5
 done
-curl -fsS "http://127.0.0.1:$HF_PORT/ready" >/dev/null || fail "hfctl /ready не ответил за 300 с"
+curl -fsS "http://127.0.0.1:$HF_PORT/health" >/dev/null || fail "hfctl /ready не ответил за 300 с"
 rd "podman ps (hfctl-контейнер running)"
 podman ps --format '{{.Names}} {{.Status}}'
 
