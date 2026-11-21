@@ -202,3 +202,19 @@ llm-lab секция «EXP-004». probe-лестница (196608→…) — эт
 (kill-тест): контейнер остаётся Exited. Автоподнятие = systemd timer 1 мин →
 `gfctl _watchdog` → up при отсутствии маркера `.gfctl-stopped`; явная
 остановка только через `gfctl off`.
+
+## F26 · Живые эндпоинты и stderr-логи gufo/hipfire (окно FAEX, 2026-11-21)
+- gufo: `/ready` → 200 когда модель загружена; `/health` → 503 при загрузке,
+  200 после. Смоук/wait_health живут на своём эндпоинте; EXP-скрипты должны
+  различать: gуф-ожидание = `$GF_PORT/ready`, hfctl = `$HF_PORT/health`
+  (у hipfire `/ready` = 404, `/health` = 200 — источник двух FAIL-артефактов
+  EXP-014/015 первого прогона).
+- gufo пишет строки лога в STDERR контейнера → `podman logs` отдаёт их в
+  stderr процесса; `gfctl logs` обязан делать `podman logs … 2>&1`
+  (дефект найден и закрыт окном, коммит 81b4452). Строка load_completed
+  на живом образе ТАЙМСТАМПИРОВАННА (`…[INFO] [loader] event=load_completed …`)
+  — grep якорь `^event=` на живой машине не работает (EXP-011 исправлен).
+- flash-multi FAEX живой канон подтверждён: загрузка 95 с, роут
+  `mtp, sessions 2, ctx 262144`, bench 93.3 tok/s, agent-check restore 1.8 с
+  (референс 1.9). Перезаход rc 42 по video-группе НЕ встретился (группы
+  применились раньше — use не звал preflight_host в этой сессии).

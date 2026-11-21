@@ -115,6 +115,17 @@ Non-critical: ml_write на каждом use при конечном ml ≥ по
 4.1-F2; окну — тёплый sudo-кэш); мелочи в review.md.
 **Next: окно приёмки этапа 5** — план у оркестратора, два GO (FAEX, evo).
 
+**ОКНО FAEX ПРОЙДЕНО (вечер 2026-11-21, GO пользователя) — все живые пункты
+PASS.** EXP-015/012/010/014 PASS, рестарт-приём recreate+agent-check 4/4
+(restore 1.8s vs реф 1.9), ребут-приём fix-r2 (enabled → самоподъём →
+ready 200). Найден и закрыт продуктовый баг: `gfctl logs` в stderr
+(81b4452). Коммиты окна: 81b4452 (logs-фикс + EXP-бэкпорты), 7f5a0e9
+(EXP-014 health) — **пуш на пользователе, до evo-окна**. EXP-011 — на evo
+(нужен 81b4452 на машине). FAEX: hfctl-прод healthy, linger=yes. Факты — F26.
+**Next: GO на evo** (отдельный, D6): git pull (81b4452+) → EXP-011 →
+EXP-014/015 повтор → reviewer скоп-лимитед на фиксы окна. EXP-013 bare —
+deferred (D8).
+
 **4.5-watch-v2 — ЗАКРЫТ (2026-11-21, APPROVED r1).** Цепочка: brief →
 архитектор (task.md R1+R2 формулы по коду движка + R3 приёмка отклонений;
 OQ-1/OQ-2 закрыты кодом/пользователем) → developer (watch_sysfs.py +
