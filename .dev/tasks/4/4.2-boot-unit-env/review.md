@@ -91,3 +91,53 @@ Environment в юните) закрыт машиной: `history.md:49` «Реб
 
 **Итог: APPROVED.** Хвост за оркестратором: живой рестарт-приём (agent-check рестарт-restore
 без ручного rm; критерии в test-report fix-r2).
+
+## fix-r2 review (2026-11-21): enable при install_units — инцидент evo EXP-009-хвост
+
+Verdict: **CHANGES_REQUESTED**
+Round: 3. Ревью по артефактам + диффу + независимые прогоны (батарея и обе мутации воспроизведены мной на /tmp-копии; дерево и машины не тронуты, коммитов нет).
+
+### Against DoD
+
+| # | критерий | вердикт | доказательство (независимо перепроверено) |
+|---|---|---|---|
+| 1 | Дифф минимальный | **met** | `git diff --stat`: ровно 4 файла — `lib/units.sh` (+блок reload/enable×2/start в конце install_units + докстринги), `lib/autostart.sh` (ТОЛЬКО докстринг — код не тронут), `tests/run_checks.sh` (faux systemctl enable/disable → wants-симлинки, is-enabled по артефакту, §18 5 ассертов, §17 find-счётчик, §25 оверрайд), append двух артефактов. Совпадает с таблицей dev-report. Своих чужих правок нет |
+| 2 | Батарея 367/0 | **met** | Мой прогон: `ИТОГО: PASS=367 FAIL=0` (rc 0) |
+| 3 | Мутации §18 ловят | **met** | Мои прогоны на копии: мутация «без enable-строк» → `365/2` (ровно enable + wants-симлинки); «без daemon-reload+enable» → `364/3` (+daemon-reload) — совпадает с test-report, ассерты точечные |
+| 4 | После use = после cmd_on (минус linger) | **met** | Сверка кода: `install_units` = reload+enable serve+wd.service+timer+start таймера; `autostart_on` = install_units + те же (идемпотентно) + rm маркера + linger. На ЖИВОМ systemd симлинки после use и после on совпадают ({serve, timer} — см. Blocking 2), faux-различия «3 симлинка» — слепое пятно, устраняется Blocking 2 |
+| 5 | on/off/uninstall не изменены | **met** | `commands.sh` в диффе нет; `autostart_off`/`cmd_off`/`cmd_uninstall` не тронуты (дифф autostart.sh — комментарии); §24/§41 uninstall-ассерты зелёные |
+| 6 | Машины не тронуты | **met** | Весь прогон — faux-харнесс (PATH-заглушки); ssh/реальный podman в дельте отсутствуют; `/tmp`-копии удалены |
+
+BLOCKED-EXTERNAL честность: ребут-приём в обоих отчётах помечен «создан/ответа нет», PASS им не прикрывается — корректно, вердикту не мешает (как в r1/r2).
+
+### Blocking
+
+1. **Граница изменена без правки владеющей спеки** (spec honesty). Где: `.dev/SPEC.md` §2, строка «…enable/linger — только `on`/`install`» (+ зеркало в AGENTS.md, блок «Лейаут 4.4»: «enable/linger — `on`/`install`»). Что не так: дельта переносит enable в `install_units` → теперь `use` тоже делает daemon-reload/enable/start таймера — это смена контракта закрытого подэтапа 4.4-layout (его review.md:20 прямо фиксирует «enable/linger не трогаются… ассерт "нет systemctl"») и SPEC §2, но спека в дельте не отредактирована (git status: SPEC.md не менялся), ратификации в DECISIONS.md нет. Что должно быть: одна правка в той же дельте — SPEC §2 переписать хвост на «…идемпотентно; daemon-reload/enable/старт таймера — при `use`/`install`/`on` (fix-r2, инцидент evo EXP-009-хвост: без enable после ребута юниты disabled); linger — только `on`/`install`» + синхронно одну строку в AGENTS.md-буллете 4.4. Направление самого фикса ПРАВИЛЬНОЕ (инцидент доказан, SPEC §1.1 «клон → use → сервер с автозапуском» иначе не выполняется) — блокирует именно незакрытая спека.
+2. **§18-ассерт «все три wants-симлинка» живьём невыполним** (находка тестера подтверждена мной: `gfctl-watchdog.service.tpl` БЕЗ `[Install]`, у serve/timer есть; по исходникам systemd mixed-enable static-юнита молча пропускается, rc=0 → третий симлинк не возникнет никогда; faux [Install] не моделирует). Решаю вариант (а) микрополиш — раунд всё равно открывается п.1, а ассерт — часть доказательства DoD этого же фикса и не должен утверждать недостижимое. Точные правки: (i) `lib/units.sh` — две enable-строки слить в одну `systemctl --user enable "$UNIT_NAME-serve.service" "$UNIT_NAME-watchdog.timer"`, в коммент-контракт добавить «watchdog.service — static ([Install] нет): запускается таймером, enable был бы no-op (fix-r2-полиш)»; (ii) докстринг install_units «enable serve+watchdog.service+watchdog.timer» → «enable serve+watchdog.timer (watchdog.service — static, поднимается таймером)»; (iii) `tests/run_checks.sh` §18 — лог-ассерт на `enable gfctl-serve.service gfctl-watchdog.service` → на `gfctl-serve.service gfctl-watchdog.timer`; из артефакт-ассерта убрать строку `[ -L "…/gfctl-watchdog.service" ] &&` (остаётся 2 симлинка). Покрытие мутаций сохраняется (проверено на копии с уже слитой строкой: без enable → 2 FAIL, без reload+enable → 3 FAIL), счётчик батареи остаётся 367. Живое поведение идентично в обоих вариантах — это полиш честности проверки, не поведения.
+
+### Non-critical notes (backlog, не блокеры)
+
+1. Новая зависимость main-пути от работающего `systemctl --user` под set -e: на хосте без юзер-сессии install/use теперь умирает громко (родной stderr) — приемлемо (продукт и так стоит на юзер-юнитах); живое подтверждение уходит в EXP-окно ребута (Note 3 тестера).
+2. После Blocking 2 забота dev-report о boot-гонке «enable'нутый watchdog.service при boot» и proposal «disable watchdog.service в off/uninstall» снимаются целиком (test-report Notes 1(в)/(г)) — в EXP-критериях оставить «watchdog.service=static — норма».
+3. Ранее поднятые backlog-кандидаты (cosmetic die render_tpl, pipefail-хрупкость порядков-ассертов) не тронуты — корректно, ждут 4.3 minor-polish.
+
+### Questions to the spec
+
+Нет сверх Blocking 1: SPEC §2 после правки п.1 противоречий с кодом не имеет; §1.1 («4 команды… с автозапуском») фикс-ом только УЛУЧШИВАЕТСЯ. Стиль соблюдён (докстринги с «почему», дифф минимальный, счётчик §17 честно переведён на find).
+
+**Итог: CHANGES_REQUESTED — 2 пункта (спека §2 + AGENTS-зеркало; микрополиш enable/ассерта §18). Оба механические, закрываются одним fix-раундом без изменения поведения.**
+
+## fix-r2 review round 3 final (2026-11-21): закрытие двух пунктов round 3
+
+Verdict: **APPROVED**
+Round: 3 final. Скоуп-лимитед: только закрытие моих двух пунктов + регрессия + вклад фикса; мутации заново не гонялись (покрытие «2 симлинка» подтверждено мной в round 3, developer прогнал 365/2 на копии). Дерево и машины не тронуты, коммитов нет.
+
+| # | пункт round 3 | вердикт | доказательство (независимо перепроверено) |
+|---|---|---|---|
+| 1 | SPEC §2 + AGENTS-буллет 4.4: контракт «enable при use/install/on, linger — только on/install» | **met** | `.dev/SPEC.md` §2: «daemon-reload/enable/старт таймера — при `use`/`install`/`on` (fix-r2, инцидент evo EXP-009-хвост…); linger — только `on`/`install`» — дословно рецепт из review; `AGENTS.md` буллет 4.4 — то же зеркало. Противоречие код↔спека устранено, код больше нигде с §2 не расходится (§1.1 теперь выполняется и для use-пути) |
+| 2 | units.sh: enable одной строкой serve+timer, watchdog.service убран, докстринг/коммент; §18: 2 симлинка + коммент | **met** | `lib/units.sh`: ровно `systemctl --user enable "$UNIT_NAME-serve.service" "$UNIT_NAME-watchdog.timer"` (одна строка), в докстринге «enable двух юнитов» + «watchdog.service — static ([Install] нет): запускается таймером, enable был бы no-op (fix-r2-полиш)». `tests/run_checks.sh` §18: лог-ассерт на `'^systemctl --user enable gfctl-serve.service gfctl-watchdog.timer$'`, артефакт-ассерт = ровно 2 симлинка + комментарий «watchdog.service static — поднимается таймером, enable не имеет эффекта»; остальные 4 §18-ассерта (daemon-reload, таймер-start, linger, юнит-файлы) не тронуты — счётчик 367 сохранён |
+| R | Регрессия | **met** | Мой прогон: `bash tests/run_checks.sh` → `ИТОГО: PASS=367 FAIL=0`; `bash -n gfctl lib/*.sh` OK. Дифф раунда не выходит за перечисленное: SPEC.md (1 лог-строка), AGENTS.md (1), units.sh (enable-слияние + докстринги), run_checks.sh (§18 два ассерта 1:1); артефакты — append'ы dev/test/review. Всё остальное от round-2-состояния не отличимо (faux systemctl, export HOME, find-счётчик §17, §25-оверрайд — хунки идентичны проверенным ранее) |
+
+Живой хвост (не влияет на вердикт, как в r1–r3): ребут-приём по EXP-критериям с дополнением «watchdog.service = static — норма» — окно оркестратора; заботы о boot-гонке watchdog.service и proposal про disable в off/uninstall сняты (юнит static, enable живьём не даёт симлинка).
+
+**Итог: APPROVED.** Оба пункта round 3 закрыты 1:1, поведение не менялось, регрессия зелёная.

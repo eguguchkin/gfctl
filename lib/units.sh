@@ -52,19 +52,28 @@ render_tpl() {
 #   ре-рендер реальных значений: без них _boot/_watchdog при ребуте взяли бы
 #   дефолты (каталог gfctl-файла) — дефект EXP-009) и gfctl-watchdog.timer — статичный
 #   tpl без плейсхолдеров, install -m 0644 (OnUnitActiveSec=1min).
-#   enable/start/linger — НЕ здесь (autostart_on).
+#   fix-r2 (инцидент evo, EXP-009-хвост): после раскладки файлов —
+#   daemon-reload + enable serve+watchdog.timer (симлинки в
+#   default.target.wants) + start таймера — иначе после перезагрузки юниты
+#   disabled и самоподъём не происходит. watchdog.service — static
+#   ([Install] нет): запускается таймером, enable был бы no-op
+#   (fix-r2-полиш). linger — НЕ здесь (autostart_on).
 #
-# Побочные эффекты: mkdir -p $UNIT_DIR; запись трёх файлов в $UNIT_DIR.
+# Побочные эффекты: mkdir -p $UNIT_DIR; запись трёх файлов в $UNIT_DIR;
+#   systemctl --user daemon-reload, enable двух юнитов, start таймера —
+#   идемпотентно (повторный install/use пересвечивает те же симлинки).
 #   В stdout не печатает.
 #
 # Ограничения/допущения: PODMAN_BIN = `command -v podman` В МОМЕНТ рендера —
 #   в батарее это PATH-заглушка (абс-путь faux), в проде /usr/bin/podman;
 #   юниты исполняют $STACK_DIR/gfctl — дерево в стеке = сам git-клон
-#   (STACK_DIR = каталог gfctl-файла, 4.4; install.sh упразднён). Живые
-#   вызовы: cmd_install/cmd_use (install_units) и autostart_on (перед enable).
+#   (STACK_DIR = каталог gfctl-файла, 4.4; install.sh упразднён). serve-юнит
+#   НЕ стартуется здесь (oneshot: контейнер уже поднимает recreate
+#   install/use; старт юнита = второй podman run). Живые вызовы:
+#   cmd_install/cmd_use (install_units) и autostart_on (перед enable).
 #
 # @returns integer       # всегда 0 при возврате — die render_tpl и сбои
-#   mkdir/install завершают процесс по set -e
+#   mkdir/install/systemctl завершают процесс по set -e
 install_units() {
   local bin
   bin="$(command -v podman)" || die "podman не найден в PATH — юниты не собрать"
@@ -76,4 +85,9 @@ install_units() {
     GFCTL_MODELS="$MODELS_BASE" GFCTL_DIR="$STACK_DIR" STACK_DIR="$STACK_DIR"
   # таймер — статичный (плейсхолдеров нет): копировать как есть
   install -m 0644 "$TPL_DIR/systemd/gfctl-watchdog.timer.tpl" "$UNIT_DIR/$UNIT_NAME-watchdog.timer"
+  # fix-r2: файлы без enable юнит не поднимают — после ребута disabled
+  # (инцидент evo: контейнер не встал, ручной `enable --now` спасал)
+  systemctl --user daemon-reload
+  systemctl --user enable "$UNIT_NAME-serve.service" "$UNIT_NAME-watchdog.timer"
+  systemctl --user start "$UNIT_NAME-watchdog.timer"
 }

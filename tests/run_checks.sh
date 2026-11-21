@@ -100,9 +100,27 @@ cat > "$FAUX/systemctl" <<'EOF'
 { printf 'systemctl'; printf ' %s' "$@"; printf '\n'; } >> "${GFCTL_FAUX_LOG:?}"
 case "${1:-} ${2:-}" in
   "--user is-enabled")
-    if [ "${GFCTL_FAUX_SYS_ENABLED:-yes}" = yes ]; then echo enabled; exit 0; fi
+    # оверрайд-сценарий приоритетен (тесты без wants-артефакта, §25);
+    # иначе честный предикат: enable-симлинк в default.target.wants (fix-r2)
+    if [ -n "${GFCTL_FAUX_SYS_ENABLED:-}" ]; then
+      if [ "${GFCTL_FAUX_SYS_ENABLED}" = yes ]; then echo enabled; exit 0; fi
+      echo disabled; exit 1
+    fi
+    if [ -e "${HOME:?}/.config/systemd/user/default.target.wants/${3:-}" ]; then echo enabled; exit 0; fi
     echo disabled; exit 1 ;;
 esac
+# fix-r2: enable/disable создают/снимают РЕАЛЬНЫЕ wants-симлинки — ассерты
+# проверяют артефакт ([-L .../default.target.wants/…]), не только лог
+if [ "${1:-}" = "--user" ]; then
+  ud="${HOME:?}/.config/systemd/user"; shift
+  case "${1:-}" in
+    enable)
+      shift; mkdir -p "$ud/default.target.wants"
+      for u in "$@"; do ln -sfn "$ud/$u" "$ud/default.target.wants/$u"; done ;;
+    disable)
+      shift; for u in "$@"; do rm -f "$ud/default.target.wants/$u"; done ;;
+  esac
+fi
 exit 0
 EOF
 cat > "$FAUX/loginctl" <<'EOF'
@@ -220,7 +238,7 @@ gf() {  # gf <bash-код> — stdout+stderr и rc наружу
     export PATH="$FAUX:$PATH"
     export GFCTL_FAUX_LOG="$FAUXLOG" GFCTL_FAUX_CNT="$FAUXCNT"
     export GFCTL_RECREATE_PAUSE_S=0 GFCTL_HEALTH_POLL=1 GFCTL_SMOKE_RETRY_S=0
-    HOME="$TMP/home" USER="tester"
+    export HOME="$TMP/home" USER="tester"   # export: faux systemctl пишет wants-симлинки под HOME (fix-r2)
     IMAGE="ghcr.io/gufo-org/toolboxes/gufo-runtime:latest"
     STACK_DIR="$TMP/stack" MODELS_BASE="$TMP/stack/.data/models"
     PORT=8080 BIND="0.0.0.0"
@@ -726,7 +744,9 @@ cmd_install --profile 27b-single' 2>&1); in2_rc=$?; set -e
 [ "$in2_rc" = 0 ] && ok "install повтор поверх работающего → rc 0 (идемпотентен)" || bad "install повтор (rc=$in2_rc)"
 n_run2=$(grep -c '^podman run -d' "$FAUXLOG")
 [ "$((n_run2 - n_run1))" = 1 ] && ok "повтор install: ровно один recreate (run +1, дублей нет)" || bad "повтор install run Δ=$((n_run2 - n_run1))"
-[ "$(ls "$ud" | wc -l)" = 3 ] && ok "повтор install: юнит-файлов по-прежнему 3" || bad "дубли юнитов"
+# fix-r2: в $ud появилась и default.target.wants — считаем только юнит-файлы
+[ "$(find "$ud" -maxdepth 1 -type f | wc -l)" = 3 ] \
+  && ok "повтор install: юнит-файлов по-прежнему 3 (без дублей)" || bad "дубли юнитов"
 
 echo "== 17b. memlock-гейт 4.1-F2 (EXP-008): порог 8388608 kB вместо «unlimited»"
 : > "$FAUXLOG"; rm -f "$FAUXCNT" "$FAUXCNT.curl"
@@ -755,8 +775,10 @@ set +e; ./gfctl use bogus >/dev/null 2>&1; u1_rc=$?
 [ "$u2_rc" = 1 ] && ok "use --sessions abc → die rc 1" || bad "use --sessions abc (rc=$u2_rc)"
 : > "$FAUXLOG"; rm -f "$FAUXCNT" "$FAUXCNT.curl"
 # fix-r1 (тест §18, рецепт tester): §17-install уже положил юниты в тот же
-# $ud — снимаем их, иначе ассерт «use ставит юниты» не ловит регрессию
+# $ud — снимаем их (и wants-симлинки fix-r2), иначе ассерты «use ставит
+# юниты/enable» не ловят регрессию
 rm -f "$ud/gfctl-serve.service" "$ud/gfctl-watchdog.service" "$ud/gfctl-watchdog.timer"
+rm -rf "$ud/default.target.wants"
 set +e; out=$(GFCTL_FAUX_PODMAN_LOGS="$LOGOK" gf 'ram_gate_line(){ printf "%s: ≥N GiB — есть 999.0: OK\n" "$1"; }
 cmd_use 27b-multi --sessions 2 --context 163840' 2>&1); us_rc=$?; set -e
 [ "$us_rc" = 0 ] && grep -q 'SMOKE: OK' <<<"$out" && ok "use happy-path → rc 0 (health+smoke)" || bad "use happy-path (rc=$us_rc)"
@@ -768,8 +790,23 @@ grep -q -- '--sessions 2 --context 163840' "$FAUXLOG" \
   && ok "use: recreate c sessions/context оверрайда" || bad "use run args"
 grep -q '/models/Qwen3.8-27B-DFlash2-Q4_K_M.gguf' <<<"$(grep '^podman run' "$FAUXLOG" | tail -n1)" \
   && ok "use 27b-multi: @DRAFT@ → контейнерный путь /models/<draft>" || bad "use draft путь"
-! grep -q '^systemctl' "$FAUXLOG" \
-  && ok "use: автозапуск не трогает (нет systemctl-вызовов; enable — только on/install)" || bad "use трогает автозапуск"
+# fix-r2 (инцидент evo, EXP-009-хвост): use обязан не только положить
+# юнит-файлы, но и reload+enable их — иначе после ребута disabled
+grep -q '^systemctl --user daemon-reload$' "$FAUXLOG" \
+  && ok "use: daemon-reload после рендера юнитов (fix-r2)" || bad "use: daemon-reload не вызван"
+grep -q '^systemctl --user enable gfctl-serve.service gfctl-watchdog.timer$' "$FAUXLOG" \
+  && ok "use: enable serve+watchdog.timer (fix-r2: самоподъём после ребута)" \
+  || bad "use: enable serve+watchdog.timer не вызван"
+# watchdog.service static — поднимается таймером, enable не имеет эффекта
+[ -L "$ud/default.target.wants/gfctl-serve.service" ] \
+  && [ -L "$ud/default.target.wants/gfctl-watchdog.timer" ] \
+  && ok "use: enable-симлинки в default.target.wants (артефакт, не только лог)" \
+  || bad "wants-симлинки после use отсутствуют"
+grep -q '^systemctl --user start gfctl-watchdog.timer$' "$FAUXLOG" \
+  && ok "use: watchdog-таймер запущен (состояние = как после on, кроме linger)" \
+  || bad "use: таймер не стартован"
+! grep -q 'loginctl enable-linger' "$FAUXLOG" \
+  && ok "use: linger не трогает (linger — on/install, autostart_on)" || bad "use трогает linger"
 [ -f "$ud/gfctl-serve.service" ] && [ -f "$ud/gfctl-watchdog.service" ] && [ -f "$ud/gfctl-watchdog.timer" ] \
   && ok "use: юниты поставлены идемпотентно (лейаут 4.4: первый use ставит юниты ПОСЛЕ канона; bootstrap их не ставит)" \
   || bad "use не поставил юниты"
@@ -973,10 +1010,12 @@ time.sleep(45)
 PYEOF
 LISPID=$!
 sleep 0.4
-set +e; out=$(GFCTL_FAUX_INSPECT="ghcr.io/gufo-org/toolboxes/gufo-runtime:latest" GFCTL_FAUX_PODMAN_LOGS="$LOGOK" frun status 2>&1); st1_rc=$?; set -e
+# fix-r2: is-enabled в faux = wants-артефакт; в §25 юниты ещё не расставлены
+# (§24 uninstall их снял) — автозапуск сценарим оверрайдом, секция про status
+set +e; out=$(GFCTL_FAUX_SYS_ENABLED=yes GFCTL_FAUX_INSPECT="ghcr.io/gufo-org/toolboxes/gufo-runtime:latest" GFCTL_FAUX_PODMAN_LOGS="$LOGOK" frun status 2>&1); st1_rc=$?; set -e
 grep -q '^профиль: 27b-single | health: ok | автозапуск: вкл | роут: dflash2, sessions 1, ctx 262144 | кэш: .*cache/27b-single ([0-9.]* GiB) | веса 27b: 2/2$' <<<"$out" \
   && ok "status живой: человекострока (роут+автозапуск+кэш+веса)" || bad "status живая строка: $out"
-GFCTL_FAUX_INSPECT="ghcr.io/gufo-org/toolboxes/gufo-runtime:latest" GFCTL_FAUX_PODMAN_LOGS="$LOGOK" \
+GFCTL_FAUX_SYS_ENABLED=yes GFCTL_FAUX_INSPECT="ghcr.io/gufo-org/toolboxes/gufo-runtime:latest" GFCTL_FAUX_PODMAN_LOGS="$LOGOK" \
   frun status --json > "$TMP/status_live.json" 2>&1
 python3 - "$TMP/status_live.json" <<'EOF' && ok "status --json живой: route/autostart/version/cache + старые ключи на месте" || bad "status live JSON"
 import json, sys

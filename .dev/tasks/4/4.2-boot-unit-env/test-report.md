@@ -66,3 +66,43 @@ Verdict: **PASS**
 
 1. **Латентная хрупкость батареи (pre-existing, вскрыта мутацией A)**: §17 `i_rm=$(grep -n '^podman rm' "$FAUXLOG" | …)` под `set -o pipefail` молча убивает скрипт (rc=1, без ИТОГО), если в faux-логе нет ни одной строки `podman rm` — т.е. ровно в регрессии «rm исчез из container_up» батарея обрывается до §21 и специфичный сигнал ассерта теряется (остаётся только rc=1). Аналогично устроены «порядок warn/rm/POST» и «порядок verify». Лечение — `|| true` в этих подстановках (в нейтрализованной копии все 4 порядка-ассерта честно FAIL'ят: `rm=` пустой). Кандидат в 4.3 minor-polish.
 2. Удаление пре-луп rm сменило семантику die-пути (bad-profile больше не сносит контейнер до die) — dev-report обосновывает (все живые вызывающие передают канон-профиль; die раньше всякого podman). ПротивSPEC §8 («recreate = rm+run») не бьёт: recreate-путь — успешная ветка, rm по-прежнему перед каждым run.
+
+## fix-r2 теста (2026-11-21): enable при install_units (инцидент evo, EXP-009-хвост)
+
+Verdict: **PASS**
+
+Дерево: HEAD `7325c0a` + незакоммиченный fix-r2 (`lib/units.sh`, `lib/autostart.sh`, `tests/run_checks.sh`, append dev-report). Машины не тронуты (весь прогон — faux-харнесс батареи + смок диспетчера без podman). Коммитов нет. Проверено до попытки `enable watchdog.service` живьём — верификация семантики реального systemctl выполнена по исходникам systemd v252/v256 (см. Notes 1).
+
+### Internal checks
+
+| DoD | чек | результат |
+|---|---|---|
+| 1. Батарея, rc=0, счётчик 367 | полный прогон `bash tests/run_checks.sh` на рабочем дереве | ✅ rc=0 за 19 с: `ИТОГО: PASS=367 FAIL=0`; PASS-строк 367, FAIL-строк 0; все 5 §18-ассертов fix-r2 зелёные (log:188–192) + §17-счётчик «юнит-файлов 3 (без дублей)» (log:177) |
+| 1a. Целостность счётчика (363+4) | тот же прогон на HEAD-копии (git clone → 7325c0a) | ✅ базлайн rc=0, `PASS=363 FAIL=0`; diff PASS-строк HEAD↔дерево = ровно §18 (−1 ассерт «use: автозапуск не трогает», +5 новых) + 2 косметических строки без счёта (§17 rename, §44 случайный порт) → 363+4=367, посторонних дельт нет |
+| 2. Мутация §18 «убрать блок daemon-reload/enable» (копия, не дерево) | копия mutA: sed удалены строки `daemon-reload` + обе `enable` из install_units (start остался), bash -n OK → полный прогон | ✅ rc=1, `ИТОГО: PASS=364 FAIL=3` — ровно 3 §18-FAIL: `use: daemon-reload не вызван`, `use: enable serve+watchdog.service не вызван`, `wants-симлинки после use отсутствуют`; таймер-ассерт зелёный (start не удалялся) — ассерты точечные, шума нет |
+| 2b. Мутация «только enable-строки» (копия) | копия mutB: удалены только 2 enable-строки → полный прогон | ✅ rc=1, `ИТОГО: PASS=365 FAIL=2` — ровно `enable serve+watchdog.service` + `wants-симлинки`; daemon-reload зелёный. Мутации различимы → §18 не «резиновый». «Вернуть»: рабочее дерево сверено md5 до/после — не тронуто; копии удалены |
+| 3. bash -n изменённых lib-файлов | `bash -n gfctl lib/*.sh` (+ py_compile tpl/python/*.py) | ✅ OK |
+| 4. Идемпотентность «после use = после cmd_on» | сверка кода (units.sh:88–91 ↔ autostart.sh:34–42) + ассерты батареи | ✅ install_units: reload → enable serve+watchdog.service → enable timer → start таймера; autostart_on = install_units + СВОЙ reload/enable(serve+timer)/start (дублирование идемпотентно, задокументировано в докстринге autostart.sh:25–28) + rm маркера + linger. Итог: юнит-состояние после use = после on минус linger — задокументированное отличие. Перо батареи: §18 (5 ассертов: reload/enable/симлинки/таймер/linger-нетронут), install «автозапуск ВКЛ»+enable-linger (log:695/724), `gfctl on → rc 0` (:905), off/uninstall linger off (:902/:988); повтор install → rc 0, юнит-файлов 3 (идемпотентность нового блока, log:745–748) |
+| 5. Смок диспетчера (без podman) | `./gfctl` / `./gfctl --help` / `GFCTL_PORT=59999 ./gfctl status --json` | ✅ без аргументов → usage, rc=1 (usage и есть action recipe); --help → rc=0; мёртвый порт → rc=0, валидный JSON `"health":"не запущен"` — корректный отказ, не краш |
+
+### Failures (FAIL)
+
+Нет.
+
+### External experiments
+
+| EXP-id | DoD | статус |
+|---|---|---|
+| Живой ребут-приём fix-r2 (самоподъём после enable; evo/FAEX — следующий ребут после пуша) | закрытие EXP-009-хвоста | **создан/описан, ответа нет** (живой приём вне подэтапа, окно оркестратора — вердикту не мешает, как в r1/r2). Критерии приёма дополнены Notes 1: `is-enabled` → serve=enabled, timer=enabled, **watchdog.service=static (симлинка не будет — это норма)**; после ребута gfctl-serve active без ручных команд |
+
+### Regression
+
+- Полная батарея = регресс всех закрытых подэтапов — зелёная 367/0 (§17/§18 юниты+env, §21 rm-ретрай прошлого fix-r2, §24/§41 uninstall v2, §25 status+оверрайд, §44/§45 от 4.3, agent-check, watchdog, boot).
+- AGENTS-чеки все выполнены (bash -n, py_compile, usage rc=1, status --json refusal).
+- Мутационные копии, HEAD-клон и логи удалены (/tmp чист); рабочее дерево после мутаций — md5-сверка OK; `.data/` в корне репо — артефакт сессии разработчика 2026-11-20 22:25 (пустой каркас), мной не создавался и не тронут; машины не тронуты; коммитов нет.
+
+### Notes (non-blocking, ревьюеру)
+
+1. **enable watchdog.service на живом systemd — безоперационный no-op (faux-слепое пятно, НЕ брейкер)**: tpl/systemd/gfctl-watchdog.service.tpl НЕ имеет секции [Install] (корректно — юнит запускается таймером, канон logrotate.service; [Install] есть в serve и timer). По исходникам systemd v252/v256 (`verb_enable` + `do_unit_file_enable` + `install_context_apply`): mixed-вызов `enable serve.service watchdog.service` на живой системе → rc=0, serve получает wants-симлинк, watchdog.service пропускается молча (0 правил симлинков; notice «no installation config» не печатается, т.к. carries_install_info=1 от serve; AUXILIARY_FAILED не срабатывает — файл юнита существует). Следствия: (а) die на живой машине невозможен — fix-r2 безопасен, цели инцидента достигаются парой serve+timer; (б) §18-ассерт «enable-симлинки в default.target.wants (все три)» зелёный в батарее, но живьём третий симлинк не возникнет никогда — faux enable не моделирует [Install]; лог-ассерты (вызов случился) живы и честны; (в) опасение dev-report о boot-гонке «enable'нутый watchdog.service при boot» — структурно беспочвенно (static-юнит при boot не стартует); (г) note dev-report про «висящий wants-симлинк watchdog.service» в off/uninstall — moot. Опция polish (не блокер): убрать watchdog.service из enable-вызова + из faux-ассерта, или оставить как есть + одна строка-комментарий в units.sh — решение за оркестратором; на живое поведение не влияет.
+2. Оверрайд `GFCTL_FAUX_SYS_ENABLED` — единственный потребитель §25 (2 вызова status, log:1015/1018); остальные is-enabled идут по wants-артефакту честно — все зелёные в полном прогоне.
+3. Системного systemctl в среде нет — живой отказ systemctl-вызовов не моделировался; по контракту units.sh (`@returns`: сбои mkdir/install/systemctl завершают процесс по set -e) отказ громкий с родным stderr — подтверждается контрактом, живое подтверждение уходит в EXP-окно ребута.

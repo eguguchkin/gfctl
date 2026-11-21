@@ -56,7 +56,9 @@ gfctl status              # проверка
   (решение 1.2: serve-юнит сам поднимает канон), образ ghcr,
   `limits.d/99-gfctl-memlock.conf`, группа render, linger. Юниты ставятся
   при первом `use`/`install` (после записи канона, идемпотентно);
-  enable/linger — только `on`/`install`.
+  daemon-reload/enable/старт таймера — при `use`/`install`/`on` (fix-r2,
+  инцидент evo EXP-009-хвост: без enable после ребута юниты disabled);
+  linger — только `on`/`install`.
 
 ## 3 · Карта команд
 

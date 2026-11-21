@@ -186,3 +186,124 @@ die-пути: раньше bad-profile `container_up` успевал снест�
   диагностик по ранним попыткам нужен — копить хвосты логов до rm следующей
   попытки (бэклог, окно покажет).
 
+
+---
+
+## fix-r2: enable при install_units (2026-11-20, подэтап 4.4-хвост / инцидент evo EXP-009-хвост)
+
+- База: HEAD `7325c0a` (4.4-layout APPROVED), батарея 363/0 до правки.
+- Статус: **developed** (не коммитил; машины не трогал).
+- Дифф: `lib/units.sh` (+18/−5), `lib/autostart.sh` (только докстринг),
+  `tests/run_checks.sh`; полный прогон **367 PASS / 0 FAIL ×2**.
+
+### Инцидент и причина
+
+Живой evo (EXP-009-хвост): после перезагрузки gfctl-сервер не поднялся —
+юниты disabled. Причина: решение 4.4 «юниты при первом use» реализовано
+неполно — `install_units` рендерил и раскладывал юнит-файлы в
+`~/.config/systemd/user/`, но не делал `daemon-reload`/`enable` → нет
+симлинков в `default.target.wants`, после ребута поднимать нечему.
+Контингент на машине: `systemctl --user enable --now gfctl-serve.service`
+(поднято вручную; FAEX сейчас healthy на ручном enable — живой ребут-приём
+вне подэтапа).
+
+### Правка (lib/units.sh, конец install_units)
+
+```bash
+systemctl --user daemon-reload
+systemctl --user enable "$UNIT_NAME-serve.service" "$UNIT_NAME-watchdog.service"
+systemctl --user enable "$UNIT_NAME-watchdog.timer"
+systemctl --user start "$UNIT_NAME-watchdog.timer"
+```
+
+Сверка с `autostart_on` (цель «после use состояние юнитов = после cmd_on»):
+- enable serve + watchdog.service + watchdog.timer, daemon-reload — теперь
+  в `install_units`, т.е. и у `use`, и у `install`, и у `on` (идемпотентно);
+- serve-юнит НЕ стартуется из install_units (oneshot: recreate в use/install
+  уже поднял контейнер; старт юнита = второй podman run) — по условию задачи;
+- watchdog-таймер стартуется (страж падений активен сразу после use — как
+  после on);
+- **linger — единственное отличие от cmd_on**: остаётся в autostart_on
+  (on/install) — sudo из install_units не добавляли (исключение инварианта
+  4.4, таблица в 4.4-layout-python-decision.md);
+- on/off/uninstall поведение НЕ менялось: autostart_on сохраняет свои
+  reload/enable/start (теперь частичное дублирование install_units —
+  вызовы идемпотентны; в докстринге отмечено), cmd_off/cmd_uninstall без
+  правок.
+
+### Батарея (363 → 367, ×2 прогона)
+
+- faux systemctl умеет enable/disable как РЕАЛЬНЫЕ артефакты: создаёт/снимает
+  симлинки `$HOME/.config/systemd/user/default.target.wants/<unit>`;
+  `is-enabled` теперь честный предикат по wants-симлинку (оверрайд
+  `GFCTL_FAUX_SYS_ENABLED=yes|no` сохранён — им сценарится §25, где юниты
+  ещё не расставлены после §24-uninstall). В `gf`-харнессе HOME/USER
+  экспортированы (faux пишет под HOME).
+- §18 (юниты при use): фикс-r1-очистка расширена (`rm -rf default.target.wants`),
+  старый ассерт «use не зовёт systemctl» заменён контрактом fix-r2 (5
+  ассертов): daemon-reload вызван; enable serve+watchdog.service вызван;
+  все три wants-симлинка существуют (артефакт, не только лог); таймер
+  стартован; linger НЕ тронут. +2 ассерта на use-юниты из 4.4 остались.
+- §17: подсчёт «юнит-файлов по-прежнему 3» переведён на `find -maxdepth 1
+  -type f` (в `$ud` появилась `default.target.wants` — ls-счётчик давал 4).
+
+### Мутации (проверено на копиях репо)
+
+| мутация | результат |
+|---|---|
+| удалён блок reload+enable×2 из install_units (остался start) | §18: 3 FAIL (daemon-reload, enable, wants-симлинки) → 364/3 |
+| удалены ТОЛЬКО enable-строки (reload остался) | §18: 2 FAIL (enable, wants-симлинки) → 365/2 |
+
+Чистое дерево: `bash -n` зелёный, **367/0 ×2**.
+
+### Не проверено живьём
+
+- Ребут-приём (самоподъём после enable) — окно EXP-009-хвоста на машине;
+  FAEX сейчас healthy на ручном `enable --now` — до окна ребутить нельзя.
+- Поведение при boot-гонке serve `_boot` ↔ немедленный `_watchdog` от
+  enable'нутого watchdog.service (оба при старте юзер-менеджера):
+  container_up с rm-в-цикле делает гонку безопасной по построению, но
+  живого наблюдения нет — зафиксировать факт в окне.
+
+### Out-of-scope proposals
+
+- `off`/`uninstall` снимают enable только у serve+timer (не watchdog.service):
+  на батарее это невидимо (faux disable точечный), в живой системе остаётся
+  висящий wants-симлинк на удалённый файл — безвреден (юнит-файла нет),
+  но для гигиены можно добавить watchdog.service в disable-список
+  cmd_off/cmd_uninstall в окне миграции (сейчас не трогали по ограничению
+  «не менять off/uninstall поведение»).
+
+### fix-r2 round 3 (2026-11-21): 2 механических пункта review CHANGES_REQUESTED
+
+Применяны ровно пункты review.md («fix-r2 review», Round 3), поведение не менялось.
+
+1. **Спека (Blocking 1)**: `.dev/SPEC.md` §2 — хвост буллета про юниты
+   переписан: «daemon-reload/enable/старт таймера — при `use`/`install`/`on`
+   (fix-r2, инцидент evo EXP-009-хвост: без enable после ребута юниты
+   disabled); linger — только `on`/`install`». Зеркало — буллет 4.4 в
+   `AGENTS.md` (одна строка: enable перенесён в use/install/on, linger —
+   on/install).
+2. **Микрополиш (Blocking 2)**: `lib/units.sh` — две enable-строки слиты в
+   одну `systemctl --user enable serve.service watchdog.timer`
+   (watchdog.service — static, без [Install]: живой systemd mixed-enable
+   молча пропускает — юнит поднимается таймером, enable был бы no-op);
+   докстринг/коммент-контракт обновлены («enable двух юнитов», static-примечание).
+   `tests/run_checks.sh` §18: лог-ассерт на enable serve+timer; артефакт-ассерт
+   wants-симлинков 3 → 2 (serve.service + watchdog.timer) + однострочный
+   комментарий «watchdog.service static — поднимается таймером, enable не
+   имеет эффекта».
+
+DoD раунда 3:
+- батарея **367/0 ×2** (счётчик не менялся — ассерты заменены 1:1);
+- мутационная защита §18 своим прогоном на копии: удалены enable-строки →
+  **365/2** («use: enable serve+watchdog.timer не вызван» + «wants-симлинки
+  после use отсутствуют») — ловится;
+- `bash -n` зелёный;
+- дифф раунда = только перечисленные строки: `.dev/SPEC.md` (1 строка),
+  `AGENTS.md` (1 строка), `lib/units.sh` (enable-слияние + докстринги),
+  `tests/run_checks.sh` (§18 два ассерта). Машины не тронуты, коммитов нет.
+- Note 2 review: забота о boot-гонке enable'нутого watchdog.service и
+  proposal «disable watchdog.service в off/uninstall» сняты (юнит static —
+  enable'лся только в faux, живьём симлинка нет); EXP-критерий «watchdog.service
+  = static — норма».

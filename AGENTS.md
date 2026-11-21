@@ -24,7 +24,9 @@ che-evo (60 GiB) и che-FAEX1 (128 GB).
   проверяет `.gitignore` — без `.data/`+`logs/` печатает warn).
 - Bootstrap «первого запуска»: любой вызов `./gfctl` создаёт каркас
   `.data/` (юниты НЕ ставит); systemd-юниты ставят `use`/`install`
-  идемпотентно — после записи канона; enable/linger — `on`/`install`.
+  идемпотентно — после записи канона; daemon-reload/enable/старт таймера —
+  `use`/`install`/`on` (fix-r2: без enable после ребута юниты disabled);
+  linger — `on`/`install`.
 - `install.sh` упразднён (4.4): доставка = git clone; полный снос стека —
   руками (`rm -rf` клона + `podman rmi`).
 - `uninstall` (v2): контейнер + юниты + watchdog + linger + limits.d-файл;

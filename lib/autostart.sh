@@ -22,8 +22,11 @@
 # Ограничения/допущения: enable ≠ немедленный пуск serve-юнита: он стартует
 #   при boot (_boot ждёт GPU-ноды), таймер активен сразу (первый тик
 #   OnBootSec=2min); поднять сервер СЕЙЧАС — cmd_on (autostart_on + cmd_up).
-#   По set -e сбой любого незаглушённого шага завершает процесс. Живые
-#   вызовы: cmd_on и cmd_install (кроме --no-autostart).
+#   daemon-reload/enable/start здесь ДУБЛИРУЮТ install_units (fix-r2:
+#   она сама делает reload+enable+start таймера) — вызовы идемпотентны,
+#   поведение on не меняется; уникальные для autostart_on шаги — снятие
+#   маркера и linger. По set -e сбой любого незаглушённого шага завершает
+#   процесс. Живые вызовы: cmd_on и cmd_install (кроме --no-autostart).
 #
 # @stdout string            # «автозапуск ВКЛ (serve-юнит + watchdog-таймер
 #   1м, linger=yes)»
