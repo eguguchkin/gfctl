@@ -80,3 +80,60 @@ Fix-round counter: F1–F4 + fix-r1 (hfctl) закрыты. ЭТАП 4: ЗАКР
    gfctl-acc-models, gufo-exp, halogen-*, halogen-cache, gfctl-acc, gfctl-acc-src, gfctl-gh,
    src, hfctl-deploy, .local/share/containers…): что нужно / что удалить (вместе с этапом
    «удаление дома hipfire» и учётом «evo-повтер опция»).
+
+## План — пересмотр (2026-11-21, решение пользователя)
+
+Порядок фаз: **B → C → A(внутри C)**. Фаза A (живые хвосты: ребут-приём fix-r2,
+рестарт-приём recreate без контингента rm, EXP-010/011) переносится ПОСЛЕ этапа 5
+(C) и растворяется в его приёмочном окне:
+
+- рестарт-приём проверяет класс «already in use», который этап 5 убирает
+  первопричиной (CONTAINERS_CONF-скоуп slirp4netns) — проверять до C = платить дважды;
+- bare-Ubuntu приёмка этапа 5 (install → ребут → самоподъём) — это и есть
+  ребут-приём fix-r2 (enable при install_units), на финальном коде;
+- EXP-010/011 и живой прогон watch v2 — попутно в том же окне.
+
+Риск принят: fix-r2 остаётся непроверенным живьём до этапа 5; обе машины в
+`gfctl off` (прод = hfctl healthy), простоя не несёт. Если gfctl понадобится
+на машинах до этапа 5 — внеплановый ребут-чек в ближайшем окне.
+
+Итоговый порядок: **B (watch v2, код) → C (этап 5: preflight apt + GPU-подготовка +
+slirp-скоуп + orphan-heal-решение + сценарная приёмка; одно окно закрывает и хвосты A)
+→ D (ревизия /home/ai, косметика, non-critical бэклог) параллельно.**
+
+## Текущий подэтап
+
+**5.1-parity-preflight — ЗАКРЫТ (2026-11-21, APPROVED r1).** Цепочка:
+brief → архитектор (task.md R1+R2, ратификации D8: mirror-хил/bare deferred/
+строго И1) → developer (preflight_host install+use, apt-пятёрка, GPU-группы,
+slirp-скоуп .gfctl-containers.conf, gf_orphan_heal 1:1, doctor-дельта,
+EXP-013/014/015 созданы не запущены; AGENTS/SPEC той же дельтой) →
+tester **PASS** (400/0 ×2, mirror построчно 1:1, env-чистота shell, EXP-
+структуры) → reviewer **APPROVED r1** (blocking нет; hfctl-mirror awk-живой,
+exit 42 не задвоен, И1-формулировка честна, spec_validate valid).
+Non-critical: ml_write на каждом use при конечном ml ≥ порога (унаследовано
+4.1-F2; окну — тёплый sudo-кэш); мелочи в review.md.
+**Next: окно приёмки этапа 5** — план у оркестратора, два GO (FAEX, evo).
+
+**4.5-watch-v2 — ЗАКРЫТ (2026-11-21, APPROVED r1).** Цепочка: brief →
+архитектор (task.md R1+R2 формулы по коду движка + R3 приёмка отклонений;
+OQ-1/OQ-2 закрыты кодом/пользователем) → developer (watch_sysfs.py +
+watch_engine.py + rewrite watch_tui.py, фикстуры snap1/2/3, shell-слой не
+тронут) → tester **PASS** (381/0, базлайн независимо 367; формулы R2 сверены
+по коду) → reviewer **APPROVED r1** (blocking нет; spec_validate valid;
+SPEC §3/§8 той же дельтой). EXP-012-watch-v2-live создан, НЕ запущен (D6) —
+живой приём в окно этапа 5. Non-critical backlog: мёртвый fmt_uptime
+(watch_tui.py:170, удалить следующей дельтой), аддендум формул в
+4.5-watch-v2-decision.md, ассерт «средняя не падает», подпись «live-пульс»,
+TUI-геометрия на живом TTY (EXP-012).
+
+## Next (фаза C — этап 5)
+
+Паритет поставки (SPEC «Этап 5»): preflight apt podman/podman-compose,
+GPU-подготовка, slirp4netns-скоуп, orphan-heal-решение, сценарная приёмка
+И2/И3. Требует: GO пользователя на открытие этапа (design-heavy →
+архитектор), затем окна на машины (два отдельных GO: FAEX и evo — D6).
+В том же окне: EXP-010 (машинная ветка, опция), EXP-011, EXP-012 (watch v2
+живой), ребут-приём fix-r2 + рестарт-приём (перенесены из фазы A, см.
+«План — пересмотр»). Фаза D (ревизия /home/ai, косметика PLAN.md,
+non-critical бэклог) — параллельно, по GO.

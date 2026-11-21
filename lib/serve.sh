@@ -8,6 +8,12 @@
 # F10. Модуль читает CONTAINER/IMAGE/STACK_DIR/MODELS_BASE (диспетчер),
 # canon_*/write-функции (state.sh), profile_field/models_dir_for (profiles.sh),
 # set_file_role (models.sh); пишет через log/warn/die.
+# Этап 5.1 (D8): самолечение storage-сирот — mirror hf_orphan_heal (hfctl
+# lib/autostart.sh:294–328, только ЧТЕНИЕ) 1:1 по духу gfctl-конвенций:
+# gf_orphan_heal + кап GF_ORPHAN_HEALS/HEAL_MAX за процесс.
+
+HEAL_MAX="${GFCTL_HEAL_MAX:-2}"        # кап самолечений storage-сирот за процесс (hook батареи)
+GF_ORPHAN_HEALS=0                      # счётчик выполненных самолечений в этом процессе
 
 # Назначение: напечатать аргументы движка (`gufo serve llm …`) ОДНОЙ строкой
 #   для хвоста `podman run … <image> <serve-строка>`: --host 0.0.0.0 всегда
@@ -67,6 +73,46 @@ gpu_nodes_present() {
   [ -e /dev/kfd ] && compgen -G '/dev/dri/renderD*' >/dev/null
 }
 
+# Назначение: самолечение storage-сироты «already in use by an external
+#   entity» (рассинхрон libpod-БД и storage-слоя podman; класс наблюдён в
+#   окнах 2026-11-21, D8 — mirror hfctl 13.1): вынуть ID контейнера-сироты
+#   из вывода podman run, удалить его containers-storage delete-container и
+#   вернуть 0 — вызывающий (container_up) делает один retry попыткой цикла.
+#   Гард'ы: пустой ID (сигнатуры нет) → rc 1 молча; кап HEAL_MAX за процесс
+#   (GF_ORPHAN_HEALS); бинаря containers-storage нет → WARN с ручной
+#   командой, поведение как прежде (Variant B); ID, видимый libpod, — НЕ
+#   сирота, трогать нельзя (страховка от удаления живого контейнера при
+#   обратном рассинхроне); delete-container отказался → WARN.
+#
+# Побочные эффекты: при успехе — containers-storage delete-container <ID>
+#   (самолечение засчитано в глобал GF_ORPHAN_HEALS) и log-строка; при
+#   отказе хила — warn-строка в stderr. Ничего не удаляет, кроме сироты
+#   из текста ошибки.
+#
+# Ограничения/допущения: требует глобалы GF_ORPHAN_HEALS/HEAL_MAX (шапка
+#   модуля) и log/warn (диспетчер). Синтаксис хила —
+#   containers-storage-delete-container(1) (флагов -f нет; отказ → WARN,
+#   поведение = прежнее). ID ищется по сигнатуре «already in use by
+#   <12..64-hex>»; grep глушен `|| true` — пустой ID = не сирота (rc 1).
+#   Вызывается из container_up только при отказе podman run (happy-path
+#   не зовёт).
+#
+# @param 1: string  # полный вывод неудачного `podman run` (2>&1)
+# @stdout string   # log-строка при успехе; warn-строки при отказе (stderr)
+# @returns integer # 0 — сирота найдена и удалена; 1 — сигнатуры нет / кап /
+#   бинаря нет / ID видит libpod / delete-container отказался
+gf_orphan_heal() {
+  local id
+  id=$(printf '%s' "$1" | { grep -oE 'already in use by [0-9a-f]{12,64}' || true; } | head -1 | awk '{print $5}')
+  [ -n "$id" ] || return 1
+  [ "$GF_ORPHAN_HEALS" -lt "$HEAL_MAX" ] || return 1        # кап за процесс
+  command -v containers-storage >/dev/null || { warn "containers-storage нет в PATH — самолечение невозможно: sudo apt install containers-storage; вручную: containers-storage delete-container $id"; return 1; }
+  podman inspect -f '{{.State.Status}}' "$id" >/dev/null 2>&1 && { warn "ID $id видит libpod — не сирота, самолечение отменено"; return 1; }
+  GF_ORPHAN_HEALS=$((GF_ORPHAN_HEALS + 1))
+  containers-storage delete-container "$id" || { warn "containers-storage delete-container $id отказался"; return 1; }
+  log "storage-сирота $id удалена (external entity) — повторяю up"
+}
+
 # Назначение: состояние контейнера — stdout `podman inspect -f
 #   '{{.State.Status}}'` (running/exited/created/…) либо строка `missing`
 #   при недоступном контейнере (fallback `|| echo missing`, как в hfctl
@@ -114,11 +160,14 @@ container_stop() {
 #      (контейнерные пути весов = /models/<файл>, как задуманы токены
 #      profiles.sh) и .data/cache/<профиль> → /cache; хвост — serve_args из
 #      канона); успех → выход; неудача → пауза 5 с и повтор (занятый порт
-#      и прочие транзитивные отказы, F10); все попытки неудачны → хвост
-#      podman logs + die.
+#      и прочие транзитивные отказы, F10); отказ run с сигнатурой
+#      «already in use by <ID>» → gf_orphan_heal (самолечение storage-сироты,
+#      D8/mirror hfctl 13.1) до следующей попытки; все попытки неудачны →
+#      хвост podman logs + die (с ручным рецептом для сироты).
 #
 # Побочные эффекты: podman rm/run; создание каталога кэша профиля; sleep
-#   пауз; при исчерпании попыток — FATAL die (exit 1).
+#   пауз; возможное containers-storage delete-container (gf_orphan_heal);
+#   при исчерпании попыток — FATAL die (exit 1).
 #
 # Ограничения/допущения: требует глобалы CONTAINER/IMAGE/STACK_DIR и
 #   canon_sessions/canon_context/canon_port/canon_bind (state.sh) — канон
@@ -130,7 +179,7 @@ container_stop() {
 # @param 1: profile_id      # канонический id профиля (каталог кэша и сет)
 # @returns integer          # 0 — контейнер запущен; die при исчерпании попыток
 container_up() {
-  local prof="$1" set_name cache_dir attempt attempts="${GFCTL_RUN_ATTEMPTS:-3}" args
+  local prof="$1" set_name cache_dir attempt attempts="${GFCTL_RUN_ATTEMPTS:-3}" args run_out
   set_name=$(profile_field "$prof" 1) || die "container_up: неизвестный профиль '$prof'"
   cache_dir="$STACK_DIR/.data/cache/$prof"
   mkdir -p "$cache_dir"
@@ -142,18 +191,24 @@ container_up() {
     # пауз, без этого run 2/3 бил в «container already in use» (EXP-009 evo-повтер)
     podman rm -f "$CONTAINER" >/dev/null 2>&1 || true
     # shellcheck disable=SC2086 — serve_args отдаёт ровно одну строку аргументов
-    if podman run -d --name "$CONTAINER" \
+    if run_out=$(podman run -d --name "$CONTAINER" \
       --device /dev/kfd --device /dev/dri --group-add keep-groups \
       --ipc=host --ulimit memlock=-1:-1 \
       --userns=keep-id:uid=1000,gid=1000 \
       -p "$(canon_bind):$(canon_port):$(canon_port)" \
       -v "$(models_dir_for "$set_name"):/models:ro" \
       -v "$cache_dir:/cache" \
-      "$IMAGE" $args; then
+      "$IMAGE" $args 2>&1); then
       return 0
+    fi
+    # отказ с сигнатурой «already in use by <ID>» → самолечение сироты
+    # (D8, mirror hfctl 13.1) ДО следующей попытки; хил не сработал →
+    # печатаем ошибку попытки как прежде (диагностика не глотается)
+    if ! gf_orphan_heal "$run_out"; then
+      [ -n "$run_out" ] && printf '%s\n' "$run_out" >&2
     fi
     [ "$attempt" -lt "$attempts" ] && sleep 5
   done
   podman logs --tail 30 "$CONTAINER" 2>&1 | tail -30 || true
-  die "podman run не удался за $attempts попыток (занятый порт/транзитивный отказ — F10; освободи порт или проверь: gfctl doctor)"
+  die "podman run не удался за $attempts попыток (занятый порт/транзитивный отказ — F10; освободи порт или проверь: gfctl doctor). Если в ошибке выше «…already in use by <ID>…», а ID не виден в podman ps -a — это storage-сирота: containers-storage delete-container <ID>"
 }

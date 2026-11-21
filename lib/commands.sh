@@ -149,13 +149,15 @@ cmd_models() {
   esac
 }
 
-# Назначение: cmd doctor — диагностика БЕЗ записи, rc 0 всегда: ОС, /dev/kfd,
-#   /dev/dri/renderD*, render-группа, memlock (+limits.d/*gfctl*), linger,
+# Назначение: cmd doctor — диагностика БЕЗ записи, rc 0 всегда: ОС, пакеты
+#   apt-пятёрки И1 (факт command -v; 5.1), /dev/kfd,
+#   /dev/dri/renderD*, группы render/video, memlock (+limits.d/*gfctl*), linger,
 #   RAM-гейты всех профилей цифрами, диск под веса (обои сета), порт, gpu-lock
 #   (WARN: кто держит GPU — соседство с hfctl-продом, D3: переключение руками),
-#   зеркало весов (GFCTL_MIRROR_BASE задан → строка; 4.1-F1), соседние
-#   артефакты (~/gufo-models ~/gufo-exp ~/halogen-* ~/gfctl-acc* —
-#   «обнаружен/не обнаружен»; 4.1).
+#   slirp-скоуп (CONTAINERS_CONF задан + файл есть) и хранилище graphRoot
+#   («общее с hfctl»; 5.1), зеркало весов (GFCTL_MIRROR_BASE задан → строка;
+#   4.1-F1), соседние артефакты (~/gufo-models ~/gufo-exp ~/halogen-*
+#   ~/gfctl-acc* — «обнаружен/не обнаружен»; 4.1).
 #
 # Побочные эффекты: только чтение системы + mkdir -p каталогов сетов
 #   (free_disk_gib); печать в stdout, WARN в stderr; ничего не меняет.
@@ -175,6 +177,15 @@ cmd_doctor() {
     pretty=$(grep '^PRETTY_NAME=' /etc/os-release | cut -d= -f2- | tr -d '"' || true)
   fi
   echo "ОС: ${pretty:-?}"
+  # 5.1: apt-пятёрка И1 (факт command -v; «нет» — информация, не WARN:
+  # doctor работает и на голой машине до всего)
+  local pkg_line
+  pkg_line="podman: $(command -v podman >/dev/null 2>&1 && echo да || echo нет)"
+  pkg_line+=" | podman-compose: $(command -v podman-compose >/dev/null 2>&1 && echo да || echo нет)"
+  pkg_line+=" | containers-storage: $(command -v containers-storage >/dev/null 2>&1 && echo да || echo нет)"
+  pkg_line+=" | psmisc (fuser): $(command -v fuser >/dev/null 2>&1 && echo да || echo нет)"
+  pkg_line+=" | curl: $(command -v curl >/dev/null 2>&1 && echo да || echo нет)"
+  echo "пакеты (apt-пятёрка И1): $pkg_line"
   if [ -e /dev/kfd ]; then echo "/dev/kfd: есть"; else echo "/dev/kfd: ? (нет — ROCm/GPU-ускорение недоступно)"; fi
   rd=$(compgen -G '/dev/dri/renderD*' 2>/dev/null | head -n 1 || true)
   if [ -n "$rd" ]; then
@@ -182,10 +193,11 @@ cmd_doctor() {
   else
     echo "/dev/dri: ? (нет renderD*)"
   fi
-  if id -nG 2>/dev/null | tr ' ' '\n' | grep -qx render; then
-    echo "render-группа: да"
+  if id -nG 2>/dev/null | tr ' ' '\n' | grep -qx render \
+     && id -nG 2>/dev/null | tr ' ' '\n' | grep -qx video; then
+    echo "группы render/video: да"
   else
-    echo "render-группа: нет (WARN — на целевой машине: sudo usermod -aG render \$USER)"
+    echo "группы render/video: нет (WARN — sudo usermod -aG render,video \$USER)"
   fi
   ml=$(ulimit -l 2>/dev/null || echo "?")
   lim="нет"; compgen -G '/etc/security/limits.d/*gfctl*' >/dev/null 2>&1 && lim="есть"
@@ -234,6 +246,19 @@ cmd_doctor() {
   else
     echo "gpu-lock: ? (podman недоступен — проверь на целевой машине)"
   fi
+  # 5.1: slirp-скоуп (этап 5.1 — скоуп slirp4netns через CONTAINERS_CONF) и
+  # хранилище (диагностика «общее с hfctl» — graphRoot одинаков с env и без)
+  if [ -n "${CONTAINERS_CONF:-}" ] && [ -f "${CONTAINERS_CONF:-}" ]; then
+    echo "slirp-скоуп: да (slirp4netns; $CONTAINERS_CONF)"
+  else
+    echo "slirp-скоуп: нет (CONTAINERS_CONF не задан — глобальный pasta-бэкенд)"
+  fi
+  local graph="?"
+  if command -v podman >/dev/null 2>&1; then
+    graph=$(podman info --format '{{.store.graphRoot}}' 2>/dev/null || true)
+    [ -n "$graph" ] || graph="?"
+  fi
+  echo "хранилище (graphRoot): $graph (общее с hfctl — скоуп меняет только сетевой бэкенд)"
   # этап 4.1: «соседние» артефакты — что осталось от окон исследований
   # (~/gufo-*, ~/halogen-*) и приёмок (~/gfctl-acc*); только чтение.
   local home="${HOME:-}" art
@@ -364,10 +389,125 @@ cmd_status() {
 
 # ── 1.2: install / use / logs / smoke / uninstall ───────────────────────────
 
+# ── 5.1 (И1): единый preflight хоста — install И use ─────────────────────────
+# Назначение: довести хост до готовности одним блоком (зеркало hfctl 13.2 +
+#   gfctl-специфика; И1 «голая Ubuntu одной командой» — первый use обязан сам
+#   довести хост). Порядок гейтов фиксированный: ОС Linux → GPU-подготовка
+#   (гейты /dev/kfd|/dev/dri; группы render,video через sudo usermod при их
+#   отсутствии + честное «после перезахода» + exit 42; нет GPU → info-пропуск)
+#   → железный гейт gpu_nodes_present → RAM-гейт профиля → apt-пятёрка И1
+#   (podman podman-compose containers-storage psmisc curl; ОДИН
+#   update+install ТОЛЬКО при непустом need-списке, «всё на месте» → ноль
+#   sudo/apt-вызовов; нет sudo/apt-get/сети → громкий die с ручным рецептом)
+#   → gpu-lock warn (podman ps непуст → WARN «переключение руками», D3 — без
+#   takeover) → memlock-гейт (4.1-F2, порог 8388608 kB; unlimited → PASS;
+#   «?»/<порога → limits.d-файл + WARN «перелогинься» + exit 42; ≥порога →
+#   файл + WARN «достаточно», продолжаем) — тексты и коды прежние
+#   байт-в-байт. GPU-prep до apt: не делать sudo-apt машине, которая сейчас
+#   уйдёт в exit 42 по группам (как в hfctl 13.2); apt после железного/RAM-
+#   гейтов: не ставить пакеты машине, которая всё равно умрёт; memlock —
+#   последний sudo-шаг: его exit 42 = «перезаход», к этому моменту пакеты и
+#   группы уже обработаны; повтор после перезахода — полный no-op по sudo.
+#
+# Побочные эффекты: sudo usermod -aG render,video (только при добавлении;
+#   далее exit 42); sudo apt-get update+install (только при недостающих
+#   пакетах); limits.d/99-gfctl-memlock.conf (memlock-гейт); log/warn-строки;
+#   exit 42 — штатный код «нужен ребут/перелогин».
+#
+# Ограничения/допущения: требует gpu_nodes_present/ram_gate_line (serve.sh/
+#   profiles.sh) и log/warn/die (диспетчер). GFCTL_KFD/GFCTL_DRI — path-хуки
+#   существования ТОЛЬКО для selfcheck-батареи (прод env пуст; дефолты —
+#   /dev/kfd и /dev/dri); железный гейт остаётся на gpu_nodes_present
+#   (compgen renderD*) — два механизма живут рядом без конфликта. limits.d —
+#   ЕДИНСТВЕННЫЙ владелец файла memlock-гейт (GPU-prep второй файл не пишет —
+#   merge-логика 4.4). usermod отказал (нет группы в системе — экзотика) →
+#   set -e роняет с rc usermod — честный отказ. kfd-нет + dri-есть: группы
+#   применяются (идемпотентная безвредная мутация, прецедент hfctl 13.2),
+#   затем громкий die железного гейта. Оба вызова (install/use) на
+#   установленной машине = полный no-op без sudo.
+#
+# @param 1: profile_id      # канонический id профиля (для RAM-гейт-строки)
+# @stdout string            # info/log-строки шагов + «RAM-гейт: …»
+# @stderr string            # WARN перезахода/apt/gpu-lock/memlock
+# @returns integer          # 0 — хост готов; die (1)/exit 42 по гейтам
+preflight_host() {
+  local prof="$1"
+  [ "$(uname -s)" = "Linux" ] || die "нужна Linux-машина (Ubuntu/Debian), сейчас: $(uname -s)"
+  local kfd="${GFCTL_KFD:-/dev/kfd}" dri="${GFCTL_DRI:-/dev/dri}"
+  if [ -e "$kfd" ] || [ -e "$dri" ]; then
+    if ! id -nG 2>/dev/null | tr ' ' '\n' | grep -qx render \
+       || ! id -nG 2>/dev/null | tr ' ' '\n' | grep -qx video; then
+      log "добавляю ${USER:-$(id -un)} в группы render,video (sudo точечно)"
+      sudo usermod -aG render,video "${USER:-$(id -un)}"
+      warn "группы применятся только после перезахода. Выйди и зайди снова (новая ssh-сессия годится), затем повтори команду."
+      exit 42
+    fi
+  else
+    log "GPU-устройства не найдены ($kfd, $dri) — GPU-подготовка пропущена"
+  fi
+  gpu_nodes_present || die "нет /dev/kfd или /dev/dri/renderD* — GPU недоступен (preflight; проверь: gfctl doctor)"
+  local gate; gate=$(ram_gate_line "$prof")
+  case "$gate" in
+    *": НЕДОСТАТУПЕН") die "RAM-гейт: $gate — отказ ДО трафика (SPEC §5)" ;;
+    *": НЕИЗВЕСТНО")   die "RAM-гейт: $gate — MemTotal не читается" ;;
+  esac
+  echo "RAM-гейт: $gate"
+  local need=""
+  command -v podman             >/dev/null || need+=" podman"
+  command -v podman-compose     >/dev/null || need+=" podman-compose"
+  command -v containers-storage >/dev/null || need+=" containers-storage"
+  command -v fuser              >/dev/null || need+=" psmisc"
+  command -v curl               >/dev/null || need+=" curl"
+  if [ -n "$need" ]; then
+    command -v sudo    >/dev/null || die "sudo не найден — поставь пакеты руками:$need (apt-get install -y …) и повтори"
+    command -v apt-get >/dev/null || die "apt-get не найден (нужна Ubuntu/Debian) — поставь пакеты руками:$need"
+    log "установка пакетов:$need (sudo точечно; passt/slirp4netns/uidmap — Depends podman)"
+    sudo apt-get update -qq && sudo apt-get install -y -qq $need \
+      || die "apt не смог (сеть? репозитории? — apt-get update/install выше); поставь вручную:$need и повтори"
+  fi
+  if command -v podman >/dev/null 2>&1; then
+    local names; names=$(podman ps --format '{{.Names}}' 2>/dev/null || true)
+    [ -n "$names" ] && warn "GPU может быть занят контейнерами: $(echo "$names" | tr '\n' ' ')— gfctl не делает takeover (D3): переключение движков руками (hfctl off / gfctl off)"
+  fi
+  # memlock-гейт по порогу ДОСТАТОЧНОСТИ (4.1-F2, EXP-008/FAEX), не по
+  # «unlimited»: в средах без pam_limits (ssh + podman-run) unlimited
+  # недостижим, а relogin ulimit не меняет — прежний гейт циклился
+  # (install: файл+exit 42 ↔ uninstall: файл снесён). Порог 8388608 kB
+  # (8 GiB) — нижняя граница: все живые окна (F20/F23 105 GiB, EXP-002..007
+  # FAEX 1318060032 kB) грузили движок при ulimit кратно выше. ml=unlimited
+  # → PASS без WARN; ml ≥ порога → файл (переза)писывается для будущих
+  # relogin + WARN «достаточно», install ПРОДОЛЖАЕТ; ml < порога → файл +
+  # WARN «перелогинься» + exit 42 (там relogin реально нужен); ml=«?»
+  # (нечитаемый) → прежний exit 42 — консервативно: не зная лимита,
+  # молча продолжать нельзя.
+  local ml; ml=$(ulimit -l 2>/dev/null || echo "?")
+  ml_write() {  # один и тот же файл во всех ветках гейта — ради будущих relogin
+    printf '# gfctl: memlock unlimited для ROCm/podman (SPEC §2)\n* soft memlock unlimited\n* hard memlock unlimited\n' \
+      | sudo tee /etc/security/limits.d/99-gfctl-memlock.conf >/dev/null
+  }
+  if [ "$ml" = "unlimited" ]; then
+    :  # PASS без WARN
+  elif [ "$ml" = "?" ]; then
+    ml_write
+    warn "memlock не читается (ulimit -l) — записан /etc/security/limits.d/99-gfctl-memlock.conf; ПЕРЕЛОГИНЬСЯ (или ребутни) и повтори gfctl install"
+    exit 42
+  elif [ "$ml" -ge 8388608 ]; then
+    ml_write
+    warn "memlock ${ml} kB — достаточно (порог 8388608 kB); limits.d/99-gfctl-memlock.conf перезаписан для будущих relogin"
+  else
+    ml_write
+    warn "memlock ${ml} kB < порога 8388608 kB — записан /etc/security/limits.d/99-gfctl-memlock.conf; ПЕРЕЛОГИНЬСЯ (или ребутни) и повтори gfctl install"
+    exit 42
+  fi
+}
+
 # Назначение: cmd install — полная постановка сервера (идемпотентен; SPEC §3):
-#   preflight-гейты (ОС Linux → die; GPU-ноды → die; RAM-гейт профиля
-#   НЕДОСТАТУПЕН → die с цифрами; render-группа → WARN; gpu-lock (podman ps
-#   непуст) → WARN «переключение руками», D3: без takeover; memlock-гейт по
+#   preflight-гейты — preflight_host() (этап 5.1, единый блок для install И
+#   use: ОС Linux → die; GPU-подготовка групп render,video → exit 42;
+#   GPU-ноды → die; RAM-гейт профиля НЕДОСТАТУПЕН → die с цифрами; apt-пятёрка
+#   И1 одним вызовом при непустом need → die с рецептом при отказе;
+#   gpu-lock (podman ps непуст) → WARN «переключение руками», D3: без
+#   takeover; memlock-гейт по
 #   порогу 8388608 kB (4.1-F2, EXP-008: в средах без pam_limits unlimited
 #   недостижим, relogin ulimit не меняет): unlimited → PASS без WARN;
 #   ≥ порога → limits.d-файл (для будущих relogin) + WARN «достаточно»,
@@ -423,50 +563,7 @@ cmd_install() {
     esac
   done
   log "preflight: профиль $prof"
-  [ "$(uname -s)" = "Linux" ] || die "нужна Linux-машина (Ubuntu/Debian), сейчас: $(uname -s)"
-  gpu_nodes_present || die "нет /dev/kfd или /dev/dri/renderD* — GPU недоступен (preflight; проверь: gfctl doctor)"
-  local gate; gate=$(ram_gate_line "$prof")
-  case "$gate" in
-    *": НЕДОСТАТУПЕН") die "RAM-гейт: $gate — отказ ДО трафика (SPEC §5)" ;;
-    *": НЕИЗВЕСТНО")   die "RAM-гейт: $gate — MemTotal не читается" ;;
-  esac
-  echo "RAM-гейт: $gate"
-  id -nG 2>/dev/null | tr ' ' '\n' | grep -qx render \
-    || warn "юзер не в группе render — доступ к /dev/dri может отказать (на целевой машине: sudo usermod -aG render \$USER)"
-  if command -v podman >/dev/null 2>&1; then
-    local names; names=$(podman ps --format '{{.Names}}' 2>/dev/null || true)
-    [ -n "$names" ] && warn "GPU может быть занят контейнерами: $(echo "$names" | tr '\n' ' ')— gfctl не делает takeover (D3): переключение движков руками (hfctl off / gfctl off)"
-  fi
-  # memlock-гейт по порогу ДОСТАТОЧНОСТИ (4.1-F2, EXP-008/FAEX), не по
-  # «unlimited»: в средах без pam_limits (ssh + podman-run) unlimited
-  # недостижим, а relogin ulimit не меняет — прежний гейт циклился
-  # (install: файл+exit 42 ↔ uninstall: файл снесён). Порог 8388608 kB
-  # (8 GiB) — нижняя граница: все живые окна (F20/F23 105 GiB, EXP-002..007
-  # FAEX 1318060032 kB) грузили движок при ulimit кратно выше. ml=unlimited
-  # → PASS без WARN; ml ≥ порога → файл (переза)писывается для будущих
-  # relogin + WARN «достаточно», install ПРОДОЛЖАЕТ; ml < порога → файл +
-  # WARN «перелогинься» + exit 42 (там relogin реально нужен); ml=«?»
-  # (нечитаемый) → прежний exit 42 — консервативно: не зная лимита,
-  # молча продолжать нельзя.
-  local ml; ml=$(ulimit -l 2>/dev/null || echo "?")
-  ml_write() {  # один и тот же файл во всех ветках гейта — ради будущих relogin
-    printf '# gfctl: memlock unlimited для ROCm/podman (SPEC §2)\n* soft memlock unlimited\n* hard memlock unlimited\n' \
-      | sudo tee /etc/security/limits.d/99-gfctl-memlock.conf >/dev/null
-  }
-  if [ "$ml" = "unlimited" ]; then
-    :  # PASS без WARN
-  elif [ "$ml" = "?" ]; then
-    ml_write
-    warn "memlock не читается (ulimit -l) — записан /etc/security/limits.d/99-gfctl-memlock.conf; ПЕРЕЛОГИНЬСЯ (или ребутни) и повтори gfctl install"
-    exit 42
-  elif [ "$ml" -ge 8388608 ]; then
-    ml_write
-    warn "memlock ${ml} kB — достаточно (порог 8388608 kB); limits.d/99-gfctl-memlock.conf перезаписан для будущих relogin"
-  else
-    ml_write
-    warn "memlock ${ml} kB < порога 8388608 kB — записан /etc/security/limits.d/99-gfctl-memlock.conf; ПЕРЕЛОГИНЬСЯ (или ребутни) и повтори gfctl install"
-    exit 42
-  fi
+  preflight_host "$prof"
   local healthy=0
   if port_open "$(canon_port)"; then
     if [ "$(container_state)" = running ]; then
@@ -633,7 +730,9 @@ probe_context() {
 
 # Назначение: cmd use <профиль> — переключить профиль (SPEC §3; этап 2.1):
 #   resolve (алиасы) → die при неизвестном; --sessions/--context — isint;
-#   RAM-гейт целевого профиля → die при НЕДОСТАТУПЕН; ensure_weights
+#   preflight_host (5.1/И1: use = входная команда «одной командой» — гейты
+#   хоста как у install: ОС/GPU-подготовка/железо/RAM/apt-пятёрка/gpu-lock/
+#   memlock) → ensure_weights
 #   (ленивый добор) → выбор контекста (дерево решений, одно, без веток
 #   «по настроению»): --context N задан → он (WARN и от --no-probe, если он
 #   тоже задан — OQ-3); иначе canon_pair_context(prof, sessions): непуст +
@@ -683,12 +782,7 @@ cmd_use() {
     esac
   done
   log "use: профиль $prof"
-  local gate; gate=$(ram_gate_line "$prof")
-  case "$gate" in
-    *": НЕДОСТАТУПЕН") die "RAM-гейт: $gate — отказ ДО трафика (SPEC §5)" ;;
-    *": НЕИЗВЕСТНО")   die "RAM-гейт: $gate — MemTotal не читается" ;;
-  esac
-  echo "RAM-гейт: $gate"
+  preflight_host "$prof"   # 5.1 (И1): первый use доводит хост сам — гейты как у install
   local set_name eff_sessions ctx probe_path=0 ladder
   set_name=$(profile_field "$prof" 1)
   ensure_weights "$set_name" || die "веса сета $set_name не докачаны (ленивый добор не удался)"

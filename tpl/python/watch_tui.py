@@ -1,48 +1,43 @@
 #!/usr/bin/env python3
-# Назначение: `gfctl watch` — живой дашборд gufo-сервера (SPEC §3/§8):
-#   ОДИН коллектор данных и два рендерера: TUI (curses, TTY) и plain-стрим
-#   строк (не-TTY: пайп/файл). Режим выбирается sys.stdout.isatty().
-#   РАЗНИЦА движков против hfctl-каркаса (тот же рендер/клавиши/поток
-#   логов, слой данных перестроен): gufo НЕ имеет /stats — /metrics
-#   ЕДИНСТВЕННЫЙ движковый источник; печатаются СЫРЫЕ ключи `llamacpp:*`
-#   (факт-база подтверждает только llamacpp:prompt_tokens_cached_total —
-#   имена НЕ выдумываются, полный список снимает EXP-007); model/uptime —
-#   из сида логов (model= последней load_completed — подстрока до
-#   «sessions=», как parse_route; uptime — от первого timestamp лога);
-#   «Память» — MemTotal/MemAvailable /proc/meminfo + первая temp*_input
-#   /sys/class/hwmon. Блоки (SPEC §3): «Движок», «Скорость», «Память»,
-#   «Логи» (podman logs -f, deque 500, stderr→stdout — podman печатает
-#   логи в stderr). Мёртвый сервер: plain — РОВНО одна строка
-#   «недоступен» на тик; TUI — блок «Движок» = «недоступен»; urllib/curl
-#   -ошибка → значение None, без traceback-спама.
+# Назначение: `gfctl watch` — живой дашборд gufo-сервера v2 (SPEC §3,
+#   task.md + Round 2): ОДИН коллектор данных и два рендерера — TUI
+#   (curses, TTY) и plain-стрим (не-TTY); режим по sys.stdout.isatty().
+#   Блоки: «Железо» (GPU из sysfs — перенос hfctl 1:1, CPU Tctl,
+#   device-lost из /metrics красным при >0), «Память» (RAM+VRAM/GTT),
+#   «Движок» (вычисляемые формулы v2 из кумулятивных /metrics — см.
+#   watch_engine; роут из лога load_completed, режим — /ready +
+#   configured), «Скорость» (sparkline Δ за тик — «пульс», НЕ скорость;
+#   token-счётчики LIVE — docs server.md:1557–1558), «Логи» (podman logs
+#   БЕЗ -t — время в строках движка; TZ-конверсия UTC→локальный НА
+#   РЕНДЕРЕ). Данные-роль — watch_sysfs (sysfs/proc) + watch_engine
+#   (/metrics, формулы, дельты, парсеры лога) — этот файл только харнес.
+#   Мёртвый сервер: plain — РОВНО одна строка «недоступен» на тик;
+#   TUI — блок «Движок» = «недоступен»; без traceback-спама (v1).
 #
-# Входы — ТОЛЬКО env (bash передаёт без argv, паттерн hfctl):
-#   GFCTL_WATCH_PORT (def 8080), GFCTL_WATCH_INTERVAL (def 2; float;
-#   <0.05 — батарейный режим без сна), GFCTL_WATCH_CONTAINER (def gufo);
-#   батарейный шов GFCTL_WATCH_TICKS (0/нет = бесконечно; N>0 — N тиков
-#   и выход); GFCTL_WATCH_SELFCHECK=1 — assert-самопроверка без сервера
-#   и TTY (exit 0/1). Клавиши TUI: q/Q — выход rc 0; +/- (=/_) — интервал
-#   ±1 с (min 1); p — пауза live-лога.
+# Входы — ТОЛЬКО env (bash cmd_watch передаёт без argv, паттерн hfctl):
+#   GFCTL_WATCH_PORT (def 8080, D2), GFCTL_WATCH_INTERVAL (def 2; float;
+#   <0.05 — батарея без сна), GFCTL_WATCH_CONTAINER (def gufo); швы
+#   батареи GFCTL_WATCH_TICKS (0/нет = бесконечно) и
+#   GFCTL_WATCH_SELFCHECK=1 (assert-самопроверка без сервера/TTY,
+#   exit 0/1). Клавиши TUI: q/Q — выход rc 0; +/= / -/_ — интервал ±1 с
+#   (min 1); p — пауза live-лога.
 #
-# Побочные эффекты: каждый тик — GET /metrics (curl из PATH, таймаут 5 с);
-#   чтение /proc, /sys — каждый тик независимо от сервера; TUI — сид
-#   `podman logs -t --tail 50` (до первой рамки) + daemon-поток
-#   `podman logs -t --tail 1 -f`; TUI рисует в alt-экране, выход снимает
-#   экран (endwin). Файлов и стека не меняет.
+# Побочные эффекты: каждый тик — GET /metrics + GET /ready (curl из
+#   PATH, таймаут 5 с); чтение /proc, /sys — каждый тик независимо от
+#   сервера; TUI — сид `podman logs --tail 50` (до первой рамки) +
+#   daemon-поток `podman logs --tail 1 -f`; рисует в alt-экране, выход
+#   снимает (endwin). Файлов и стека не меняет.
 #
 # Ограничения/допущения: stdlib only, синтаксис 3.8+; HTTP — только в
 #   главном потоке; глифы Unicode при UTF-8-окружении, ASCII-фолбэк;
-#   initscr-краш (TERM неизвестен) → фолбэк в plain, не краш; uptime по
-#   сиду --tail 50 — best-effort (у долгоживущего лога начала может не
-#   быть → «?»).
+#   initscr-краш (TERM неизвестен) → фолбэк в plain, не краш; uptime v1
+#   УБРАН по составу v2 (task.md Round 2: строки «Движок» — роут/режим/
+#   формулы; идея вернуть в «Режим» — out-of-scope).
 #
 # @returns integer  # 0 — обычный выход (q / Ctrl-C / SIGTERM / тики); 1 — selfcheck упал
 import curses
-import glob
-import json
 import locale
 import os
-import re
 import shutil
 import signal
 import subprocess
@@ -52,17 +47,10 @@ import threading
 import time
 from collections import deque
 
-C_RED, C_GREEN = 1, 2
+import watch_engine
+import watch_sysfs
 
-CONFIRMED_CACHED = 'llamacpp:prompt_tokens_cached_total'  # единственный подтверждённый ключ (FX-W5)
-TS_RE = re.compile(r'^(\d{4}-\d{2}-\d{2})[ T](\d{2}:\d{2}:\d{2})')
-
-METRICS_FIXTURE = (
-    '# HELP llamacpp:prompt_tokens_cached_total Total prompt tokens reused from cache\n'
-    'llamacpp:prompt_tokens_cached_total 539\n'
-    'llamacpp:foo_bucket{le="10"} 3\n'
-    'llamacpp:bar{machine="x"} 7\n'
-)
+C_RED, C_GREEN, C_YELLOW = 1, 2, 3
 
 
 def env_float(name, default):
@@ -96,31 +84,15 @@ class Glyphs:
         self.v = '│' if utf8 else '|'
         self.dot = '●' if utf8 else 'o'
         self.deg = '°C' if utf8 else 'C'
-
-
-def _read(path):
-    # @returns string|None  # содержимое (strip); нет файла → None
-    try:
-        with open(path, 'r') as f:
-            return f.read().strip()
-    except OSError:
-        return None
-
-
-def _num(s):
-    # @returns float|None
-    if s is None:
-        return None
-    try:
-        return float(s)
-    except ValueError:
-        return None
+        self.bar_full = '█' if utf8 else '#'
+        self.bar_empty = '░' if utf8 else '.'
+        self.spark = watch_engine.SPARK_UTF if utf8 else watch_engine.SPARK_ASCII
 
 
 def http_get(url, timeout=5.0):
     # @returns string   # тело ответа; сбой — исключение (зовущий ловит).
-    #   curl из PATH (не urllib): faux-bin-шов батареи — счётчик /metrics-
-    #   вызовов виден в FAUXLOG/счётчике (§D теста watch)
+    #   curl из PATH (не urllib): faux-bin-шов батареи — счётчик вызовов и
+    #   URL-лог видны в FAUXLOG/GFCTL_FAUX_CNT.curl (§37)
     p = subprocess.run(['curl', '-fsS', '-m', '%.0f' % max(1, timeout), url],
                        stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
     if p.returncode != 0:
@@ -128,95 +100,196 @@ def http_get(url, timeout=5.0):
     return p.stdout.decode('utf-8', 'replace')
 
 
-def parse_metrics(text):
-    # @returns dict     # name → float; '# …' и *_bucket{…} отброшены,
-    #   labels {…} сняты с имени (ключи gufo с ':' идут как есть)
-    out = {}
-    for line in text.splitlines():
-        line = line.strip()
-        if not line or line.startswith('#'):
-            continue
-        parts = line.split()
-        if len(parts) < 2:
-            continue
-        name = parts[0]
-        if '{' in name:
-            name = name.split('{', 1)[0]
-        if name.endswith('_bucket'):
-            continue
-        try:
-            out[name] = float(parts[1])
-        except ValueError:
-            continue
-    return out
+def fmt1(x):
+    # @returns string  # 1 знак; None → '-' (нет данных/деление на 0)
+    return '-' if x is None else '%.1f' % x
 
 
-def parse_seed(lines):
-    # @param 1: iterable  # строки лога (сид deque стримера)
-    # @returns (string|None, float|None)  # (model, uptime_s): model — из
-    #   ПОСЛЕДНЕЙ load_completed, подстрока между «model=» и « sessions=»
-    #   (имена с пробелами — то же правило, что parse_route); uptime —
-    #   now − первый timestamp «YYYY-MM-DD HH:MM:SS» лога; нет данных → None
-    model = None
-    first_ts = None
-    for line in lines:
-        m = TS_RE.match(line)
-        if m and first_ts is None:
-            try:
-                first_ts = time.mktime(time.strptime(
-                    m.group(1) + ' ' + m.group(2), '%Y-%m-%d %H:%M:%S'))
-            except ValueError:
-                pass
-        if 'load_completed' in line and 'model=' in line:
-            name = line.split('model=', 1)[1].split('sessions=', 1)[0].strip()
-            if name:
-                model = name
-    return model, ((time.time() - first_ts) if first_ts else None)
+def fmti(x, q='?'):
+    # @returns string  # целое; None → q (нет ключа/датчика)
+    return q if x is None else str(int(x))
 
 
-def read_first_temp(base='/sys/class/hwmon'):
-    # @returns float|None  # первая temp*_input /1000 (°C, 1 знак); нет → None
-    for hw in sorted(glob.glob(base + '/hwmon*')):
-        for tf in sorted(glob.glob(hw + '/temp*_input')):
-            v = _num(_read(tf))
-            if v is not None:
-                return round(v / 1000.0, 1)
-    return None
+def fmt_pct(x):
+    # @returns string  # проценты 1 знак с '%'; None → '?'
+    return '?' if x is None else '%.1f%%' % x
 
 
-def read_mem():
-    # @returns dict     # /proc/meminfo в GiB (1 знак): available_gib, total_gib
-    kib = {}
+def fmt_gib(b):
+    # @returns string  # байты → GiB 1 знак; None → '?' (датчик/поле нет)
+    return '?' if b is None else fmt1(b / (1024.0 ** 3))
+
+
+def fmt_tok(v):
+    # @returns string  # счётчик компактно: <1000 — целое, → «99.1k», ≥1M → «1.2M»
+    if v is None:
+        return '?'
+    if v >= 1_000_000:
+        return '%.1fM' % (v / 1e6)
+    if v >= 1000:
+        return '%.1fk' % (v / 1000.0)
+    return str(int(v))
+
+
+def fmt_c(x):
+    # @returns string  # °C 1 знак; None → '?'
+    return '?' if x is None else '%.1f' % x
+
+
+def temp_color(deg, fmt=None):
+    # @param 2: callable  # печататель (fmt_c/fmti) — порог сравнивается по
+    #   НАПЕЧАТАННОМУ значению (79.95 печатается «80.0» → жёлтый; hfctl 1:1);
+    #   без fmt — по сырому числу
+    # @returns integer  # None→0; ≥90 → C_RED; 80…89.9 → C_YELLOW; иначе 0
+    #   (пороги DoD: жёлтый 80–89 °C, красный ≥90)
+    if deg is None:
+        return 0
+    if fmt is not None:
+        deg = float(fmt(deg))
+    if deg >= 90:
+        return C_RED
+    if deg >= 80:
+        return C_YELLOW
+    return 0
+
+
+def mem_fill_color(avail, total):
+    # @returns integer  # цвет RAM по заполнению (task.md Round 2: пороги
+    #   зеркалят температурные 90/80): доля avail/total ≤0.1 → C_RED,
+    #   ≤0.2 → C_YELLOW, иначе 0; нет данных → 0
+    if avail is None or total is None or total <= 0:
+        return 0
+    frac = avail / total
+    if frac <= 0.1:
+        return C_RED
+    if frac <= 0.2:
+        return C_YELLOW
+    return 0
+
+
+def fmt_uptime(s):
+    # @returns string  # d/h/m; None → '?' (v1 1:1 — статус-бар/журналы)
+    if s is None:
+        return '?'
+    s = int(s)
+    d, rem = divmod(s, 86400)
+    h, rem = divmod(rem, 3600)
+    m, sec = divmod(rem, 60)
+    if d:
+        return '%dd %dh %dm' % (d, h, m)
+    if h:
+        return '%dh %dm' % (h, m)
+    return '%dm %ds' % (m, sec)
+
+
+def dead_line(ts, port):
+    # @returns string  # ровно ОДНА строка мёртвого сервера (plain, на тик)
+    return '%s сервер недоступен (нет /metrics на :%d); жду…' % (ts, port)
+
+
+def fmt_plain(snap, route, conf, deltas, ts, glyphs=None):
+    # @returns list  # срез 4 блоков plain-стрима (порядок фиксирован:
+    #   железо/память/движок/скорость); «Логи» печатает вызывающий —
+    #   хвост буфера c TZ-конверсией. Чего нет → '?', нет данных → '-'
+    g = glyphs or Glyphs(choose_utf8())
+    st = snap['stats'] or {}
+    gpu = snap['gpu']
+    if gpu is None:
+        gpu_part = 'GPU: карта AMD (0x1002) не найдена'
+    else:
+        gpu_part = ('GPU %s%s %sMHz %sW %s%% VRAM %s GiB GTT %s GiB'
+                    % (fmt_c(gpu['temp_c']), g.deg, fmti(gpu['sclk_mhz']),
+                       fmti(gpu['power_w']), fmti(gpu['busy_pct']),
+                       fmt_gib(gpu['vram_used']), fmt_gib(gpu['gtt_used'])))
+    cpu = snap['cpu_t']
+    cpu_part = ('CPU %s%s' % (fmt_c(cpu), g.deg)) if cpu is not None else 'CPU ?'
+    line_hw = '%s [железо] %s | %s | lost %s' % (
+        ts, gpu_part, cpu_part, fmti(st.get('device_lost')))
+
+    mem = snap['mem']
+    gp = gpu or {}
+    line_mem = ('%s [память] RAM %s/%s GiB | VRAM %s GiB | GTT %s GiB'
+                % (ts, fmt1(mem.get('available_gib')), fmt1(mem.get('total_gib')),
+                   fmt_gib(gp.get('vram_used')), fmt_gib(gp.get('gtt_used'))))
+
+    conf_part = ''
+    if any(conf.values()):
+        disk = conf.get('disk')
+        disk_s = (fmt1(float(disk) / (1024.0 ** 3)) + ' GiB') if disk else '?'
+        conf_part = ' | cache: ram %s · disk %s' % (
+            conf.get('ram_cache') or '?', disk_s)
+    lookup = ''
+    lt = st.get('lookup_tok') or 0
+    la = st.get('lookup_acc') or 0
+    if lt > 0 or la > 0:
+        lookup = ' | lookup %s/%s (%s)' % (fmt_tok(la), fmt_tok(lt),
+                                           fmt_pct(st.get('lookup_pct')))
+    line_en = ('%s [движок] gen %s/%s tok/s | prefill %s/%s | кэш %s | спек %s'
+               ' | KV %s пик %s | оч %s/%s | префил %s+%s | сген %s'
+               ' | %s · s%s · ctx %s | %s%s%s'
+               % (ts, fmt1(st.get('gen_avg')), fmt1(st.get('gen_last')),
+                  fmt1(st.get('prefill_avg')), fmt1(st.get('prefill_last')),
+                  fmt_pct(st.get('cache_pct')), fmt_pct(st.get('spec_pct')),
+                  fmt_pct(st.get('kv_pct')), fmt_tok(st.get('kv_peak')),
+                  fmti(st.get('q_proc')), fmti(st.get('q_def')),
+                  fmt_tok(st.get('tok_prompt')), fmt_tok(st.get('tok_cached')),
+                  fmt_tok(st.get('tok_pred')),
+                  route['spec'] or '?', route['sessions'] or '?',
+                  route['ctx'] or '?', 'готов' if snap['ready'] else 'нет',
+                  conf_part, lookup))
+
+    d = deltas or {}
+    line_sp = ('%s [скорость] пульс: decode +%s prefill +%s drafts +%s (ток/тик)'
+               % (ts, d.get('decode') or 0, d.get('prefill') or 0,
+                  d.get('drafts') or 0))
+    return [line_hw, line_mem, line_en, line_sp]
+
+
+def put(win, y, x, s, attr=0):
+    # addstr в точку окна; обрезка по краю, за пределом — молча (деградация,
+    # не трейс — каркас hfctl)
+    h, w = win.getmaxyx()
+    if y < 0 or y >= h or x >= w or not s:
+        return
+    if x < 0:
+        s = s[-x:]
+        x = 0
+    if x + len(s) > w:
+        s = s[:w - x]
+    if not s:
+        return
     try:
-        with open('/proc/meminfo', 'r') as f:
-            for line in f:
-                key, _, rest = line.partition(':')
-                parts = rest.split()
-                if parts:
-                    try:
-                        kib[key.strip()] = int(parts[0])
-                    except ValueError:
-                        pass
-    except OSError:
+        win.addstr(y, x, s, attr)
+    except (curses.error, UnicodeEncodeError, ValueError):
         pass
-    gib = 1048576.0
 
-    def g(key):
-        v = kib.get(key)
-        return None if v is None else round(v / gib, 1)
 
-    return {'available_gib': g('MemAvailable'), 'total_gib': g('MemTotal')}
+def status_bar_layout(W, interval, model, paused):
+    # (left, mid, right, x_mid, x_right, draw_mid, draw_right) — каркас
+    # hfctl; модель усечена так, чтобы разрыв left→mid был ≥1 колонки
+    prefix = 'gfctl watch │ модель '
+    mid = 'интервал %g c' % interval
+    right = ('логи: live, пауза: p │ q — выход' if not paused
+             else 'логи: пауза, live: p │ q — выход')
+    right_x = max(0, W - len(right) - 1)
+    mid_x = max(0, min(W // 2 - len(mid) // 2, right_x - len(mid) - 1))
+    model_w = mid_x - len(prefix) - 3
+    left = prefix + model[:max(0, model_w)]
+    draw_mid = mid_x > 2 + len(left)
+    draw_right = right_x > 2 + len(left)
+    return left, mid, right, mid_x, right_x, draw_mid, draw_right
 
 
 class LogStreamer(threading.Thread):
-    """Логи движка: сид `podman logs -t --tail 50` (seed(), синхронно в
-    главном потоке ДО первой рамки — стартовые строки видны сразу), далее
-    live `podman logs -t --tail 1 -f` (дедуп первой live-строки против
-    хвоста сида). stdout построчно → deque(500). podman logs печатает логи
-    в STDERR (проверено вживую, hfctl-каркас) — ОБА вызова объединяют
-    stderr в stdout-PIPE. Поток НЕ дёргает curses и HTTP. podman/контейнер
-    нет → сид и стрим молча падают (буфер пуст), повторные попытки раз в
-    ~1 с. stop() завершает подпроцесс."""
+    """Логи движка: сид `podman logs --tail 50` (seed(), синхронно в
+    главном потоке ДО первой рамки), далее live `podman logs --tail 1 -f`
+    (дедуп первой live-строки против хвоста сида). БЕЗ `-t` в обоих
+    вызовах (task.md Round 2, DoD 4): время берём из строк движка и
+    конвертируем TZ сами. stdout построчно → deque(500). podman logs
+    печатает логи в STDERR (проверено вживую) — ОБА вызова объединяют
+    stderr в stdout-PIPE. Поток НЕ дёргает curses и HTTP. podman/
+    контейнера нет → сид и стрим молча падают (буфер пуст), повторные
+    попытки раз в ~1 с. stop() завершает подпроцесс."""
 
     def __init__(self, container):
         super().__init__(daemon=True)
@@ -231,7 +304,7 @@ class LogStreamer(threading.Thread):
         # @returns None  # нет podman/таймаут/rc≠0 — молча (буфер пуст)
         try:
             proc = subprocess.run(
-                ['podman', 'logs', '-t', '--tail', '50', self.container],
+                ['podman', 'logs', '--tail', '50', self.container],
                 stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                 text=True, errors='replace', timeout=10)
         except (FileNotFoundError, OSError, subprocess.TimeoutExpired):
@@ -248,7 +321,7 @@ class LogStreamer(threading.Thread):
         self._last_try = now
         try:
             proc = subprocess.Popen(
-                ['podman', 'logs', '-t', '--tail', '1', '-f', self.container],
+                ['podman', 'logs', '--tail', '1', '-f', self.container],
                 stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                 text=True, errors='replace')
         except (FileNotFoundError, OSError):
@@ -282,118 +355,6 @@ class LogStreamer(threading.Thread):
             self.stop()
 
 
-def fmt1(x):
-    # @returns string  # 1 знак; None → '-'
-    return '-' if x is None else '%.1f' % x
-
-
-def fmti(x, q='?'):
-    # @returns string  # целое; None → q (нет ключа/датчика)
-    return q if x is None else str(int(x))
-
-
-def fmt_tok(v):
-    # @returns string  # счётчик компактно: <1000 — целое, → «99.1k», ≥1M → «1.2M»
-    if v is None:
-        return '?'
-    if v >= 1_000_000:
-        return '%.1fM' % (v / 1e6)
-    if v >= 1000:
-        return '%.1fk' % (v / 1000.0)
-    return str(int(v))
-
-
-def fmt_c(x):
-    # @returns string  # °C 1 знак; None → '?'
-    return '?' if x is None else '%.1f' % x
-
-
-def fmt_uptime(s):
-    # @returns string  # d/h/m; None → '?'
-    if s is None:
-        return '?'
-    s = int(s)
-    d, rem = divmod(s, 86400)
-    h, rem = divmod(rem, 3600)
-    m, sec = divmod(rem, 60)
-    if d:
-        return '%dd %dh %dm' % (d, h, m)
-    if h:
-        return '%dh %dm' % (h, m)
-    return '%dm %ds' % (m, sec)
-
-
-def dead_line(ts, port):
-    # @returns string  # ровно ОДНА строка мёртвого сервера (plain, на тик)
-    return '%s сервер недоступен (нет /metrics на :%d); жду…' % (ts, port)
-
-
-def fmt_plain(snap, model, uptime, ts):
-    # @returns list  # срез блоков для plain-стрима (3 строки, порядок
-    #   фиксирован: движок/скорость/память); скорость — СЫРЫЕ числовые
-    #   llamacpp:* (sorted — детерминизм), чего нет — '?'
-    m = snap['metrics'] or {}
-    mem = snap['mem']
-    raw = sorted(k for k, v in m.items() if isinstance(v, float))
-    speed = ' '.join('%s=%s' % (k, fmti(m[k])) for k in raw) if raw else '?'
-    temp = fmt_c(snap['temp_c']) + Glyphs(choose_utf8()).deg if snap['temp_c'] is not None else '?'
-    return ['%s [движок] model: %s | uptime: %s | cached_total: %s'
-            % (ts, model or '?', fmt_uptime(uptime), fmt_tok(m.get(CONFIRMED_CACHED))),
-            '%s [скорость] %s' % (ts, speed),
-            '%s [память] RAM: %s/%s GiB | temp: %s'
-            % (ts, fmt1(mem.get('available_gib')), fmt1(mem.get('total_gib')), temp)]
-
-
-def put(win, y, x, s, attr=0):
-    # addstr в точку окна; обрезка по краю, за пределом — молча (деградация,
-    # не трейс — каркас hfctl)
-    h, w = win.getmaxyx()
-    if y < 0 or y >= h or x >= w or not s:
-        return
-    if x < 0:
-        s = s[-x:]
-        x = 0
-    if x + len(s) > w:
-        s = s[:w - x]
-    if not s:
-        return
-    try:
-        win.addstr(y, x, s, attr)
-    except (curses.error, UnicodeEncodeError, ValueError):
-        pass
-
-
-PLAIN_SNAP = {
-    'engine_ok': True,
-    'metrics': {CONFIRMED_CACHED: 539.0, 'llamacpp:zz_other': 12.0},
-    'mem': {'available_gib': 45.2, 'total_gib': 60.4},
-    'temp_c': 54.0,
-}
-PLAIN_MODEL = 'qwen3.8-27b-IQ4_XS-pure'
-PLAIN_UP = 312.0
-PLAIN_FULL = [
-    '12:00:00 [движок] model: qwen3.8-27b-IQ4_XS-pure | uptime: 5m 12s | cached_total: 539',
-    '12:00:00 [скорость] llamacpp:prompt_tokens_cached_total=539 llamacpp:zz_other=12',
-    '12:00:00 [память] RAM: 45.2/60.4 GiB | temp: 54.0°C',
-]
-
-
-def status_bar_layout(W, interval, model, paused):
-    # (left, mid, right, x_mid, x_right, draw_mid, draw_right) — каркас
-    # hfctl; модель усечена так, чтобы разрыв left→mid был ≥1 колонки
-    prefix = 'gfctl watch │ модель '
-    mid = 'интервал %g c' % interval
-    right = ('логи: live, пауза: p │ q — выход' if not paused
-             else 'логи: пауза, live: p │ q — выход')
-    right_x = max(0, W - len(right) - 1)
-    mid_x = max(0, min(W // 2 - len(mid) // 2, right_x - len(mid) - 1))
-    model_w = mid_x - len(prefix) - 3
-    left = prefix + model[:max(0, model_w)]
-    draw_mid = mid_x > 2 + len(left)
-    draw_right = right_x > 2 + len(left)
-    return left, mid, right, mid_x, right_x, draw_mid, draw_right
-
-
 def selfcheck():
     # @returns integer  # 0 — всё прошло; 1 — есть провалы (имена в stderr)
     fails = []
@@ -405,51 +366,326 @@ def selfcheck():
         if not cond:
             fails.append(name)
 
-    m = parse_metrics(METRICS_FIXTURE)
-    ck('metrics cached_total', m.get(CONFIRMED_CACHED) == 539.0)
+    # ── парсер /metrics (v1 1:1 + нейтральность к prompt_state/histogram) ──
+    m = watch_engine.parse_metrics(
+        '# HELP llamacpp:prompt_tokens_cached_total x\n'
+        'llamacpp:prompt_tokens_cached_total 539\n'
+        'llamacpp:foo_bucket{le="10"} 3\n'
+        'llamacpp:bar{machine="x"} 7\n'
+        'gufo_prompt_state_budget_bytes 123\n')
+    ck('metrics cached_total', m.get('llamacpp:prompt_tokens_cached_total') == 539.0)
     ck('metrics labels stripped', m.get('llamacpp:bar') == 7.0)
     ck('metrics _bucket excluded', 'llamacpp:foo_bucket' not in m)
-    ck('metrics # lines excluded', len(m) == 2)
+    ck('metrics # lines excluded', len(m) == 3)
+    ck('metrics prompt_state parse-neutral', m.get('gufo_prompt_state_budget_bytes') == 123.0)
 
-    ck('plain full slice', fmt_plain(PLAIN_SNAP, PLAIN_MODEL, PLAIN_UP, '12:00:00') == PLAIN_FULL)
-    ck('plain dead line', 'недоступен' in dead_line('12:00:00', 8080)
-       and dead_line('x', 1).count('недоступен') == 1)
-    ck('fmt_tok границы', fmt_tok(999) == '999' and fmt_tok(1000) == '1.0k'
-       and fmt_tok(1234567) == '1.2M' and fmt_tok(None) == '?')
-    ck('fmt_uptime', fmt_uptime(312) == '5m 12s' and fmt_uptime(None) == '?')
+    # ── engine_stats: EXP-007-снапшот (кросс-чек формул v2) ────────────────
+    m7 = watch_engine.parse_metrics(
+        'llamacpp:prompt_tokens_total 93\n'
+        'llamacpp:prompt_tokens_cached_total 27044\n'
+        'llamacpp:prompt_seconds_total 0.63273363599999999\n'
+        'llamacpp:tokens_predicted_total 18\n'
+        'llamacpp:tokens_predicted_seconds_total 0.89354949399999994\n'
+        'llamacpp:n_tokens_max 27155\n'
+        'llamacpp:spec_decode_num_drafts_total 7\n'
+        'llamacpp:spec_decode_num_draft_tokens_total 30\n'
+        'llamacpp:spec_decode_num_accepted_tokens_total 11\n'
+        'llamacpp:prompt_tokens_seconds 146.98128044515718\n'
+        'llamacpp:predicted_tokens_seconds 20.144379377825491\n'
+        'llamacpp:requests_processing 0\n'
+        'llamacpp:requests_deferred 0\n'
+        'llamacpp:kv_cache_usage_ratio 0\n'
+        'gufo_device_lost_total 0\n')
+    st7 = watch_engine.engine_stats(m7)
+    ck('stats EXP-007 gen_avg≈20.14 (18/0.8935)', abs(st7['gen_avg'] - 20.1444) < 0.01)
+    ck('stats EXP-007 prefill_avg≈146.98 (93/0.6327)', abs(st7['prefill_avg'] - 146.9813) < 0.01)
+    ck('stats EXP-007 gauge passthrough (последний)', st7['gen_last'] == 20.144379377825491
+       and st7['prefill_last'] == 146.98128044515718)
+    ck('stats EXP-007 cache_pct≈99.66 ≤100 (новый знаменатель)',
+       abs(st7['cache_pct'] - 99.658) < 0.01 and st7['cache_pct'] <= 100.0)
+    ck('stats EXP-007 spec_pct≈36.67 ПО ТОКЕНАМ (11/30, не раунды 11/7)',
+       abs(st7['spec_pct'] - 36.6667) < 0.01)
+    ck('stats EXP-007 KV/пик/очередь/lost',
+       st7['kv_pct'] == 0.0 and st7['kv_peak'] == 27155.0
+       and st7['q_proc'] == 0.0 and st7['q_def'] == 0.0 and st7['device_lost'] == 0.0)
+    ck('stats lookup нули → pct None',
+       watch_engine.engine_stats(watch_engine.parse_metrics(
+           'gufo_spec_lookup_tokens_total 0\ngufo_spec_lookup_accepted_tokens_total 0\n'
+       ))['lookup_pct'] is None)
 
+    # ── engine_stats: фикстура snap1 (точные значения) + края ─────────────
+    M1_TEXT = (
+        'llamacpp:prompt_tokens_total 10000\n'
+        'llamacpp:prompt_tokens_cached_total 990000\n'
+        'llamacpp:prompt_seconds_total 100\n'
+        'llamacpp:tokens_predicted_total 50000\n'
+        'llamacpp:tokens_predicted_seconds_total 2500\n'
+        'llamacpp:n_tokens_max 262144\n'
+        'llamacpp:spec_decode_num_drafts_total 5000\n'
+        'llamacpp:spec_decode_num_draft_tokens_total 100000\n'
+        'llamacpp:spec_decode_num_accepted_tokens_total 60000\n'
+        'llamacpp:prompt_tokens_seconds 98.7\n'
+        'llamacpp:predicted_tokens_seconds 21.4\n'
+        'llamacpp:requests_processing 0\n'
+        'llamacpp:requests_deferred 0\n'
+        'llamacpp:kv_cache_usage_ratio 0.12\n'
+        'gufo_device_lost_total 0\n')
+    m1 = watch_engine.parse_metrics(M1_TEXT)
+    st1 = watch_engine.engine_stats(m1)
+    ck('stats snap1 gen_avg ровно 20.0', st1['gen_avg'] == 20.0)
+    ck('stats snap1 prefill_avg ровно 100.0', st1['prefill_avg'] == 100.0)
+    ck('stats snap1 cache_pct ровно 99.0 (≤100)', abs(st1['cache_pct'] - 99.0) < 1e-6)
+    ck('stats snap1 spec_pct ровно 60.0 (accepted/draft_tokens)',
+       abs(st1['spec_pct'] - 60.0) < 1e-6 and st1['spec_pct'] != 60000.0 / 5000.0 * 100)
+    ck('stats деление на 0 → None (счётчики пусты до первого done)',
+       watch_engine.engine_stats(watch_engine.parse_metrics(
+           'llamacpp:tokens_predicted_total 5\nllamacpp:tokens_predicted_seconds_total 0\n'
+       ))['gen_avg'] is None)
+    ck('stats spec_pct None при draft_tokens=0',
+       watch_engine.engine_stats(watch_engine.parse_metrics(
+           'llamacpp:spec_decode_num_accepted_tokens_total 5\n'
+           'llamacpp:spec_decode_num_draft_tokens_total 0\n'))['spec_pct'] is None)
+    ck('stats None/пусто', watch_engine.engine_stats(None) is None
+       and watch_engine.engine_stats({}) is None)
+
+    # ── Deltas (пульс v2: draft по draft_tokens, без gen_last) ────────────
+    d = watch_engine.Deltas()
+    ck('deltas тик1: базы нет → все None', d.update(m1) ==
+       {'prefill': None, 'decode': None, 'drafts': None})
+    d2 = d.update(watch_engine.parse_metrics(
+        'llamacpp:prompt_tokens_total 10512\n'
+        'llamacpp:prompt_tokens_cached_total 990512\n'
+        'llamacpp:tokens_predicted_total 50300\n'
+        'llamacpp:spec_decode_num_draft_tokens_total 100000\n'))
+    ck('deltas тик2 live-пульс без done: decode +300 prefill +512 drafts +0',
+       d2 == {'prefill': 512, 'decode': 300, 'drafts': 0})
+    ck('deltas без ключа gen_last (Round 2)', 'gen_last' not in d2)
+    d3 = d.update(watch_engine.parse_metrics(
+        'llamacpp:prompt_tokens_total 10512\n'
+        'llamacpp:prompt_tokens_cached_total 990512\n'
+        'llamacpp:tokens_predicted_total 50300\n'
+        'llamacpp:spec_decode_num_draft_tokens_total 101000\n'))
+    ck('deltas тик3 done-пульс: drafts +1000 (токены), decode/prefill 0',
+       d3 == {'prefill': 0, 'decode': 0, 'drafts': 1000})
+    dn = d.update(watch_engine.parse_metrics(
+        'llamacpp:tokens_predicted_total 10\n'))  # recreate → отрицательный Δ
+    ck('deltas отрицательный Δ → None (сброс счётчиков)',
+       dn == {'prefill': None, 'decode': None, 'drafts': None})
+    d.update(None)
+    ck('deltas update(None) reset: ложных дельт после поднятия нет',
+       d.update(watch_engine.parse_metrics('llamacpp:tokens_predicted_total 10\n')) ==
+       {'prefill': None, 'decode': None, 'drafts': None})
+
+    # ── sparkline (hfctl 1:1) ──────────────────────────────────────────────
+    ck('sparkline UTF autoscale', watch_engine.sparkline([1, 2, 4, 8], 4) == '▁▂▄█')
+    tail_vals = list(range(20))
+    sp = watch_engine.sparkline(tail_vals, 8, watch_engine.SPARK_ASCII)
+    ck('sparkline tail kept + ascii', len(sp) == 8 and sp[-1] == watch_engine.SPARK_ASCII[7])
+    ck('sparkline empty → ""', watch_engine.sparkline([], 8) == '')
+    ck('sparkline нули → первые глифы (mx clamp 1)',
+       watch_engine.sparkline([0, 0], 2) == watch_engine.SPARK_UTF[0] * 2)
+
+    # ── TZ-конверсия (детерминизм: TZ=UTC через tzset) ─────────────────────
+    old_tz = os.environ.get('TZ')
+    os.environ['TZ'] = 'UTC'
+    time.tzset()
+    try:
+        ep = watch_engine.log_ts_utc_epoch('2026-11-17 23:28:03 [INFO] [gpu] event=x')
+        ck('ts epoch UTC == timegm', ep == watch_engine.log_ts_utc_epoch('2026-11-17T23:28:03 [INFO]')
+           and time.strftime('%H:%M:%S', time.gmtime(ep)) == '23:28:03')
+        ck('log_line_local UTC: метка → HH:MM:SS + хвост',
+           watch_engine.log_line_local('2026-11-17 23:28:03 [INFO] [gpu] event=x')
+           == '23:28:03 [INFO] [gpu] event=x')
+        ck('log_line_local T-разделитель', watch_engine.log_line_local(
+            '2026-11-17T08:47:19 boot') == '08:47:19 boot')
+    finally:
+        if old_tz is None:
+            os.environ.pop('TZ', None)
+        else:
+            os.environ['TZ'] = old_tz
+        time.tzset()
+    ck('log_line_local без метки — строка как есть',
+       watch_engine.log_line_local('event=listening address=http://x') ==
+       'event=listening address=http://x')
+    ck('log_ts невозможная дата → None', watch_engine.log_ts_utc_epoch('2026-13-40 99:99:99 x') is None)
+    ck('log_ts нет метки → None', watch_engine.log_ts_utc_epoch('event=listening') is None)
+
+    # ── парсеры лога (семантика parse_route/parse_configured 1:1) ─────────
     seed = ['2026-11-17 08:47:19 [INFO] boot',
             'event=load_completed speculative=mtp elapsed_ms=1 '
             'model=Qwen3.8 Flash Next sessions=2 context_tokens=262144 draft_limit=7']
-    model, up = parse_seed(seed)
-    ck('seed model с пробелами целиком', model == 'Qwen3.8 Flash Next')
-    ck('seed uptime > 0', up is not None and up > 0)
-    ck('seed без timestamp → uptime None', parse_seed(['no ts here'])[1] is None)
-    ck('seed последняя load_completed побеждает',
-       parse_seed(['model=A sessions=1 load_completed', 'model=B sessions=1 load_completed'])[0] == 'B')
+    r = watch_engine.parse_route_lines(seed)
+    ck('route: модель с пробелами целиком + поля',
+       r == {'spec': 'mtp', 'sessions': '2', 'ctx': '262144',
+             'model': 'Qwen3.8 Flash Next'})
+    r2 = watch_engine.parse_route_lines(seed + [
+        'event=load_completed speculative=dflash2 sessions=1 context_tokens=163840 model=B'])
+    ck('route: последняя load_completed побеждает', r2['spec'] == 'dflash2' and r2['model'] == 'B')
+    ck('route: пусто → все ""', watch_engine.parse_route_lines(['boot']) ==
+       {'spec': '', 'sessions': '', 'ctx': '', 'model': ''})
+    c = watch_engine.parse_configured_lines([
+        '2026-11-18 07:27:02 [INFO] [cache] schema=component-cache-v1 event=configured '
+        'sessions=1 ram_cache=on capacity_bytes=12884901888 automatic_bytes=4294967296 '
+        'disk_capacity_bytes=68719476736'])
+    ck('configured: поля + \\b-граница (capacity≠disk_capacity)',
+       c == {'sessions': '1', 'ram_cache': 'on', 'capacity': '12884901888',
+             'automatic': '4294967296', 'disk': '68719476736'})
+    ck('configured: пусто → все ""', watch_engine.parse_configured_lines(['x']) ==
+       {'sessions': '', 'ram_cache': '', 'capacity': '', 'automatic': '', 'disk': ''})
 
-    fake_hw = tempfile.mkdtemp(prefix='watch_tui_hw_')
+    # ── sysfs (фейковые деревья tempfile) ──────────────────────────────────
+    fake = tempfile.mkdtemp(prefix='watch_v2_sys_')
     try:
-        os.makedirs(fake_hw + '/hwmon3')
-        with open(fake_hw + '/hwmon3/temp1_input', 'w') as f:
-            f.write('35875\n')  # миллиградусы → 35.9 °C
-        ck('hwmon первая temp*_input', read_first_temp(fake_hw) == 35.9)
-        ck('temp fmt', fmt_c(35.9) == '35.9' and fmt_c(None) == '?')
+        os.makedirs(fake + '/drm/card0/device/hwmon/hwmon0')
+        os.makedirs(fake + '/drm/card0/device/hwmon/hwmon1')
+        os.makedirs(fake + '/drm/card1/device/hwmon/hwmon0')
+        os.makedirs(fake + '/drm/card1/device/hwmon/hwmon1')
+        os.makedirs(fake + '/drm/card2/device')
+        with open(fake + '/drm/card0/device/vendor', 'w') as f:
+            f.write('0x10de\n')  # не-AMD первой картой — skip-ветка
+        with open(fake + '/drm/card1/device/vendor', 'w') as f:
+            f.write('0x1002\n')
+        with open(fake + '/drm/card1/device/gpu_busy_percent', 'w') as f:
+            f.write('3\n')
+        with open(fake + '/drm/card1/device/hwmon/hwmon0/temp1_input', 'w') as f:
+            f.write('35875\n')
+        with open(fake + '/drm/card1/device/hwmon/hwmon1/temp1_input', 'w') as f:
+            f.write('41000\n')  # MAX по ЭТОЙ карте → 41.0
+        with open(fake + '/drm/card1/device/hwmon/hwmon1/freq1_input', 'w') as f:
+            f.write('600000000\n')
+        with open(fake + '/drm/card1/device/hwmon/hwmon1/power1_input', 'w') as f:
+            f.write('5453000\n')
+        with open(fake + '/drm/card1/device/hwmon/hwmon1/mem_info_vram_used', 'w') as f:
+            f.write('3435973837\n')
+        gpu = watch_sysfs.read_gpu(fake + '/drm')
+        ck('read_gpu: skip не-AMD, MAX temp по карте (не CPU!), поля',
+           gpu is not None and gpu['temp_c'] == 41.0 and gpu['sclk_mhz'] == 600.0
+           and abs(gpu['power_w'] - 5.453) < 1e-9 and gpu['busy_pct'] == 3.0
+           and gpu['vram_used'] == 3435973837.0)
+        with open(fake + '/drm/card2/device/vendor', 'w') as f:
+            f.write('0x1002\n')
+        ck('read_gpu: per-field None',
+           watch_sysfs.read_gpu(fake + '/drm') is not None
+           and watch_sysfs.read_gpu(fake + '/drm')['gtt_used'] is None)
+        ck('read_gpu: нет AMD → None', watch_sysfs.read_gpu(fake) is None)
+        os.makedirs(fake + '/hwmon2')
+        with open(fake + '/hwmon2/name', 'w') as f:
+            f.write('k10temp\n')
+        with open(fake + '/hwmon2/temp1_input', 'w') as f:
+            f.write('45500\n')
+        ck('read_cpu_temp: Tctl k10temp 45.5', watch_sysfs.read_cpu_temp(fake) == 45.5)
+        ck('read_cpu_temp: нет k10temp → None', watch_sysfs.read_cpu_temp(fake + '/drm') is None)
     finally:
-        shutil.rmtree(fake_hw)
+        shutil.rmtree(fake)
+    mem = watch_sysfs.read_mem()
+    ck('read_mem хост: GiB > 0', mem['total_gib'] is not None and mem['total_gib'] > 0)
 
+    # ── цвета (пороги DoD; по НАПЕЧАТАННОМУ значению) ──────────────────────
+    ck('temp_color границы 79.9/80/89.9/90/None',
+       temp_color(79.9) == 0 and temp_color(80) == C_YELLOW
+       and temp_color(89.9) == C_YELLOW and temp_color(90) == C_RED
+       and temp_color(None) == 0)
+    ck('temp_color как печатается: 79.95→"80.0"→жёлтый, 89.96→"90.0"→красный',
+       fmt_c(79.95) == '80.0' and temp_color(79.95, fmt_c) == C_YELLOW
+       and fmt_c(89.96) == '90.0' and temp_color(89.96, fmt_c) == C_RED)
+    ck('temp_color fmti: 79.96→"79"→0, 89.96→"89"→жёлтый, 90.0→красный',
+       temp_color(79.96, fmti) == 0 and temp_color(89.96, fmti) == C_YELLOW
+       and temp_color(90.0, fmti) == C_RED)
+    ck('mem_fill_color: ≤0.1 красный, ≤0.2 жёлтый, выше 0, нет данных 0',
+       mem_fill_color(5, 100) == C_RED and mem_fill_color(10, 100) == C_RED
+       and mem_fill_color(15, 100) == C_YELLOW and mem_fill_color(20, 100) == C_YELLOW
+       and mem_fill_color(50, 100) == 0 and mem_fill_color(None, 100) == 0
+       and mem_fill_color(5, 0) == 0)
+
+    # ── форматтеры ─────────────────────────────────────────────────────────
+    ck('fmt_tok границы', fmt_tok(999) == '999' and fmt_tok(1000) == '1.0k'
+       and fmt_tok(1234567) == '1.2M' and fmt_tok(None) == '?')
+    ck('fmt_gib', fmt_gib(None) == '?' and fmt_gib(1073741824) == '1.0'
+       and fmt_gib(10737418240) == '10.0')
+    ck('fmt_pct', fmt_pct(None) == '?' and fmt_pct(99.0) == '99.0%'
+       and fmt_pct(60.0396) == '60.0%')
+
+    # ── plain-срез (полный пин формата, UTF-глифы) ─────────────────────────
+    snap = {'engine_ok': True, 'metrics': m1, 'stats': st1, 'ready': True,
+            'gpu': {'temp_c': 54.0, 'sclk_mhz': 600.0, 'power_w': 5.45,
+                    'busy_pct': 3.0, 'vram_used': 3435973836.8,
+                    'gtt_used': 1181116006.4},
+            'cpu_t': 45.0,
+            'mem': {'available_gib': 45.2, 'total_gib': 60.4}}
+    route = {'spec': 'dflash2', 'sessions': '1', 'ctx': '262144',
+             'model': 'qwen3.8-27b-IQ4_XS-pure'}
+    conf = {'sessions': '1', 'ram_cache': 'on', 'capacity': '12884901888',
+            'automatic': '4294967296', 'disk': '68719476736'}
+    deltas = {'decode': 12, 'prefill': 93, 'drafts': 7}
+    plain = fmt_plain(snap, route, conf, deltas, '12:00:00', Glyphs(True))
+    ck('plain железо', plain[0] == '12:00:00 [железо] GPU 54.0°C 600MHz 5W 3% VRAM 3.2 GiB'
+       ' GTT 1.1 GiB | CPU 45.0°C | lost 0')
+    ck('plain память', plain[1] == '12:00:00 [память] RAM 45.2/60.4 GiB'
+       ' | VRAM 3.2 GiB | GTT 1.1 GiB')
+    ck('plain движок (формулы v2, роут/режим/configured)', plain[2] ==
+       '12:00:00 [движок] gen 20.0/21.4 tok/s | prefill 100.0/98.7'
+       ' | кэш 99.0% | спек 60.0% | KV 12.0% пик 262.1k | оч 0/0'
+       ' | префил 10.0k+990.0k | сген 50.0k | dflash2 · s1 · ctx 262144'
+       ' | готов | cache: ram on · disk 64.0 GiB')
+    ck('plain скорость (пульс, НЕ скорость)', plain[3] ==
+       '12:00:00 [скорость] пульс: decode +12 prefill +93 drafts +7 (ток/тик)')
+    joined = '\n'.join(plain)
+    ck('plain: prompt_state_* не читаются, lookup скрыт при нулях',
+       'budget' not in joined and 'lookup' not in joined
+       and 'budget' not in '\n'.join(fmt_plain(
+           dict(snap, stats=dict(st1, prompt_state_budget_bytes=123.0)),
+           route, conf, deltas, '12:00:00', Glyphs(True))))
+    st_l = watch_engine.engine_stats(watch_engine.parse_metrics(
+        M1_TEXT + 'gufo_spec_lookup_tokens_total 250\n'
+        'gufo_spec_lookup_accepted_tokens_total 200\n'))
+    ck('plain: lookup при ненулевых суммарных виден',
+       'lookup 200/250 (80.0%)' in fmt_plain(
+           dict(snap, stats=st_l), route, conf, deltas, '12:00:00', Glyphs(True))[2])
+
+    # ── dead-line (v1 1:1) ─────────────────────────────────────────────────
+    ck('plain dead line', 'недоступен' in dead_line('12:00:00', 8080)
+       and dead_line('x', 1).count('недоступен') == 1)
+
+    # ── rows_* (TUI-строки, стиль — код цвета или A_BOLD) ──────────────────
     w = Watch()
-    fix = dict(PLAIN_SNAP)
-    ck('rows engine labels',
-       [r[0] for r in w.rows_engine(fix, PLAIN_MODEL, 1.0)] == ['Модель', 'Uptime', 'Cached tok'])
     ck('rows engine dead',
-       w.rows_engine(dict(fix, engine_ok=False), None, None) == [('недоступен', '')])
-    ck('rows memory labels',
-       [r[0] for r in w.rows_memory(fix)] == ['RAM', 'Temp'])
-    ck('rows speed raw keys',
-       w.rows_speed(fix)[0][0] == CONFIRMED_CACHED)
+       w.rows_engine({'engine_ok': False}, route, conf) == [('недоступен', '')])
+    w.last_deltas = deltas
+    rows_e = w.rows_engine(snap, route, conf)
+    ck('rows engine labels (состав v2)',
+       [x[0] for x in rows_e] == ['Роут', 'Режим', 'Генерация', 'Prefill',
+                                  'Кэш-эффект', 'Спекуляция принято',
+                                  'Draft-пульс', 'KV', 'Очередь', 'Префил',
+                                  'Сгенерировано'])
+    ck('rows engine: спекуляция выделена A_BOLD, draft-пульс число',
+       rows_e[5][2] == curses.A_BOLD and rows_e[6][1] == '+7 ток/тик')
+    ck('rows engine: lookup скрыт при нулях',
+       'Prompt-lookup' not in [x[0] for x in rows_e])
+    rows_l = w.rows_engine(dict(snap, stats=st_l), route, conf)
+    ck('rows engine: lookup при ненулевых последней строкой',
+       rows_l[-1][0] == 'Prompt-lookup')
+    rows_hw = w.rows_hardware(snap)
+    ck('rows hardware labels',
+       [x[0] for x in rows_hw] == ['GPU temp', 'GPU freq', 'GPU load',
+                                   'GPU power', 'VRAM', 'GTT', 'CPU temp',
+                                   'Device lost'])
+    ck('rows hardware: GPU-температура жёлтая 80+ (печатаемое значение)',
+       w.rows_hardware(dict(snap, gpu=dict(snap['gpu'], temp_c=85.0)))[0][2] == C_YELLOW)
+    ck('rows hardware: lost >0 → красный', w.rows_hardware(
+        dict(snap, stats=dict(st1, device_lost=2.0)))[-1][2] == C_RED)
+    ck('rows hardware: нет AMD-карты → заглушка + CPU + lost',
+       [x[0] for x in w.rows_hardware(dict(snap, gpu=None))] ==
+       ['GPU', 'CPU temp', 'Device lost'])
+    rows_m = w.rows_memory(snap)
+    ck('rows memory labels', [x[0] for x in rows_m] == ['RAM', 'VRAM', 'GTT'])
+    ck('rows memory: RAM без цвета при 45/60',
+       rows_m[0][2] == 0 and 'GiB' in rows_m[0][1])
+    ck('rows memory: RAM красная при avail ≤10%',
+       w.rows_memory(dict(snap, mem={'available_gib': 3.0, 'total_gib': 60.4}))[0][2] == C_RED)
+    w.hist['decode'].extend([0, 1, 2])
+    ck('rows speed labels', [x[0] for x in w.rows_speed(80)] == ['decode', 'prefill', 'drafts'])
 
-    # Сид логов: без podman не падает, buf пуст (pty-окружение контейнера)
+    # ── сид логов: без podman не падает; stderr→stdout; БЕЗ -t ─────────────
     ls = LogStreamer('no-such-container')
     try:
         ls.seed()
@@ -457,26 +693,32 @@ def selfcheck():
     except Exception:
         seeded_ok = False
     ck('seed without podman no crash', seeded_ok)
-
-    # podman logs печатает в STDERR — вызовы обязаны объединять stderr в stdout
-    fake_bin = tempfile.mkdtemp(prefix='watch_tui_podman_')
+    fake_bin = tempfile.mkdtemp(prefix='watch_v2_podman_')
+    args_file = os.path.join(fake_bin, 'args')
     try:
         shim = fake_bin + '/podman'
         with open(shim, 'w') as f:
-            f.write('#!/bin/sh\necho fake-log-line >&2\n')
+            f.write('#!/bin/sh\n')
+            f.write('printf \'%%s\\n\' "$@" >> "%s"\n' % args_file)
+            f.write('echo fake-log-line >&2\n')
         os.chmod(shim, 0o755)
         old_path = os.environ['PATH']
         os.environ['PATH'] = fake_bin + os.pathsep + old_path
         try:
             ls_s = LogStreamer('no-such-container')
             ls_s.seed()
+            args = open(args_file).read().split()
             ck('seed: stderr→stdout (podman logs → stderr)',
                list(ls_s.buf) == ['fake-log-line'])
+            ck('seed args: --tail 50 и БЕЗ -t (DoD 4)',
+               '-t' not in args and args.index('--tail') >= 0
+               and args[args.index('--tail') + 1] == '50')
         finally:
             os.environ['PATH'] = old_path
     finally:
         shutil.rmtree(fake_bin)
 
+    # ── каркас (v1 1:1) ────────────────────────────────────────────────────
     ck('glyphs utf8', choose_utf8('UTF-8') is True)
     ck('glyphs ascii encoding', choose_utf8('ANSI_X3.4-1968') is False)
     ck('glyphs term dumb', choose_utf8('UTF-8', term='dumb') is False)
@@ -493,10 +735,11 @@ def selfcheck():
 
 
 class Watch:
-    """Состояние + цикл. TUI и plain используют один коллектор (collect);
-    различаются рендер и период печати. model/uptime пересчитываются из
-    буфера логов на каждый тик (после recreate сид/live приносит новый
-    load_completed — модель обновляется сама)."""
+    """Состояние + цикл. TUI и plain используют один коллектор (collect)
+    и одну обработку тика (apply_tick: дельты+история); различаются рендер
+    и период печати. Роут/cache-conf пересчитываются из буфера логов на
+    каждый тик (после recreate сид/live приносит новый load_completed —
+    обновляется само)."""
 
     def __init__(self):
         self.port = int(env_float('GFCTL_WATCH_PORT', 8080))
@@ -508,23 +751,61 @@ class Watch:
         self.glyphs = Glyphs(self.utf8)
         self.colors = False
         self.streamer = LogStreamer(self.container)
+        self.deltas = watch_engine.Deltas()
+        self.hist = {'decode': deque(maxlen=120), 'prefill': deque(maxlen=120),
+                     'drafts': deque(maxlen=120)}
+        self.last_deltas = {'decode': None, 'prefill': None, 'drafts': None}
         self.log_view = []
         self.paused = False
         self.stop = False
         self.signum = None
 
     def collect(self):
-        # @returns dict  # engine_ok — только по /metrics (единственный
-        #   движковый источник gufo); mem/temp — каждый тик независимо
-        snap = {'engine_ok': False, 'metrics': None,
-                'mem': read_mem(), 'temp_c': read_first_temp()}
+        # @returns dict  # снапшот тика: engine_ok — по /metrics; stats —
+        #   engine_stats (None при сбое); ready — GET /ready (режим «готов»);
+        #   gpu/cpu_t/mem — хост, читаются каждый тик независимо от сервера
+        snap = {'engine_ok': False, 'metrics': None, 'stats': None,
+                'ready': False, 'gpu': watch_sysfs.read_gpu(),
+                'cpu_t': watch_sysfs.read_cpu_temp(),
+                'mem': watch_sysfs.read_mem()}
         try:
-            snap['metrics'] = parse_metrics(
+            snap['metrics'] = watch_engine.parse_metrics(
                 http_get('http://127.0.0.1:%d/metrics' % self.port))
+            snap['stats'] = watch_engine.engine_stats(snap['metrics'])
             snap['engine_ok'] = True
         except Exception:
-            pass  # мёртвый сервер — значение None, не краш
+            pass  # мёртвый сервер — None, не краш (v1)
+        try:
+            http_get('http://127.0.0.1:%d/ready' % self.port)
+            snap['ready'] = True
+        except Exception:
+            pass
         return snap
+
+    def apply_tick(self, snap):
+        # Дельты + история пульса: успешный тик — update по /metrics,
+        # сбой — reset (без ложных дельт после recreate); None-дельта в
+        # истории → 0 (плоская линия sparkline)
+        if snap['engine_ok']:
+            d = self.deltas.update(snap['metrics'])
+        else:
+            d = self.deltas.update(None)
+        self.last_deltas = d
+        for key in ('decode', 'prefill', 'drafts'):
+            self.hist[key].append(d[key] or 0)
+
+    def route_conf(self):
+        # @returns (dict, dict)  # роут (load_completed) + cache-configured
+        #   из буфера логов (последняя строка побеждает)
+        buf = list(self.streamer.buf)
+        return (watch_engine.parse_route_lines(buf),
+                watch_engine.parse_configured_lines(buf))
+
+    def refresh_log_view(self):
+        # TZ-конверсия НА РЕНДЕРЕ: буфер хранит сырые строки (детерминизм
+        # паузы/перерисовки; task.md Round 1 «Логи»)
+        self.log_view = [watch_engine.log_line_local(l)
+                         for l in self.streamer.buf]
 
     def tick_done(self):
         self.ticks += 1
@@ -547,24 +828,24 @@ class Watch:
     def set_interval(self, v):
         self.interval = max(1.0, float(v))  # клавишами min 1
 
-    def engine_state(self):
-        # @returns (model, uptime_s)  # из буфера логов; пусто → (None, None)
-        return parse_seed(list(self.streamer.buf))
-
     def run_plain(self):
-        # Строки БЕСУСЛОВНО раз в interval (первая сразу). Мёртвый сервер:
-        # РОВНО одна строка «недоступен» на тик, без спама; полный срез
-        # при недоступности не печатается.
+        # v1 семантика: строки БЕЗУСЛОВНО раз в interval (первая сразу).
+        # Мёртвый сервер: РОВНО одна строка «недоступен» на тик, без спама;
+        # полный срез при недоступности не печатается. «Логи» — хвост (1
+        # строка, TZ-конвертированная) тем же блоком.
         self.streamer.seed()
         while not self.stop:
             snap = self.collect()
+            self.apply_tick(snap)
+            self.refresh_log_view()
             ts = time.strftime('%H:%M:%S')
             if snap['engine_ok']:
-                model, up = self.engine_state()
-                for line in fmt_plain(snap, model, up, ts):
+                route, conf = self.route_conf()
+                for line in fmt_plain(snap, route, conf, self.last_deltas,
+                                      ts, self.glyphs):
                     print(line, flush=True)
-                if self.streamer.buf:  # «Логи» — тем же блоком (хвост, 1 строка)
-                    print('%s [логи] %s' % (ts, self.streamer.buf[-1]), flush=True)
+                if self.log_view:
+                    print('%s [логи] %s' % (ts, self.log_view[-1]), flush=True)
             else:
                 print(dead_line(ts, self.port), flush=True)
             self.tick_done()
@@ -587,6 +868,7 @@ class Watch:
                 curses.use_default_colors()
                 curses.init_pair(C_RED, curses.COLOR_RED, -1)
                 curses.init_pair(C_GREEN, curses.COLOR_GREEN, -1)
+                curses.init_pair(C_YELLOW, curses.COLOR_YELLOW, -1)
                 self.colors = True
             except curses.error:
                 pass
@@ -599,8 +881,9 @@ class Watch:
                 if self.stop:
                     break
                 snap = self.collect()
+                self.apply_tick(snap)
                 if not self.paused:
-                    self.log_view = list(self.streamer.buf)
+                    self.refresh_log_view()
                 H, W = win.getmaxyx()
                 self.draw(win, W, H, snap)
                 win.refresh()
@@ -628,10 +911,13 @@ class Watch:
             if self.stop:
                 return
 
-    def attr(self, c):
-        if c and self.colors:
-            return curses.color_pair(c)
-        return 0
+    def attr(self, style):
+        # @returns integer  # код цвета (C_RED/C_GREEN/C_YELLOW — инт 1..3)
+        #   → curses.color_pair (при self.colors); флаги curses (A_BOLD ≥
+        #   2**16, с кодами цветов не коллидировали) → как есть; 0 → 0
+        if style in (C_RED, C_GREEN, C_YELLOW):
+            return curses.color_pair(style) if self.colors else 0
+        return style
 
     def box(self, win, x, y, w, h):
         g = self.glyphs
@@ -644,50 +930,128 @@ class Watch:
             put(win, y + i, x + w - 1, g.v)
 
     def block(self, win, x, y, w, h, title, rows):
-        # Заголовок внутри вверху; строки (label, value[, attr]) — не
+        # Рамка с заголовком В верхней границе (экономия вертикали против
+        # v1 — строки с y+1); строки (label, value[, style]) — не
         # поместившиеся отбрасываются ХВОСТОМ (деградация узкого экрана)
         self.box(win, x, y, w, h)
-        put(win, y + 1, x + 2, title, curses.A_BOLD)
+        if w >= len(title) + 6:
+            put(win, y, x + 2, self.glyphs.h + ' %s ' % title, curses.A_BOLD)
         lw = max((len(label) + 1 for label, *_ in rows), default=0)
         for i, row in enumerate(rows):
-            yy = y + 2 + i
+            yy = y + 1 + i
             if yy >= y + h - 1:
                 break
             label, value = row[0], row[1]
-            attr = row[2] if len(row) > 2 else 0
+            style = row[2] if len(row) > 2 else 0
             put(win, yy, x + 2,
-                (label + ':').ljust(lw) + ' ' + value[:max(0, w - lw - 4)], attr)
+                (label + ':').ljust(lw) + ' ' + value[:max(0, w - lw - 4)],
+                self.attr(style))
 
-    def rows_engine(self, snap, model, uptime):
-        # Мёртвый сервер — ровно строка «недоступен» (плоский ряд)
-        if not snap['engine_ok']:
-            return [('недоступен', '')]
-        return [('Модель', model or '?'),
-                ('Uptime', fmt_uptime(uptime)),
-                ('Cached tok', fmt_tok((snap['metrics'] or {}).get(CONFIRMED_CACHED)))]
-
-    def rows_speed(self, snap):
-        # Сырые числовые llamacpp:* (факт-база тонкая — печатаем как есть,
-        # имена НЕ выдумываем; EXP-007 снимет полный список → тогда подписи)
-        m = snap['metrics'] or {}
-        raw = sorted(k for k, v in m.items() if isinstance(v, float))
-        return [(k, fmti(m[k])) for k in raw] or [('ключи', '?')]
+    def rows_hardware(self, snap):
+        # Блок «Железо» (task.md Round 2): GPU sysfs (перенос hfctl 1:1),
+        # CPU Tctl, Device lost из /metrics (красный при >0 — потери
+        # GPU-контекста; '?' при отсутствии ключа — старый образ)
+        g = self.glyphs
+        gpu = snap['gpu']
+        if gpu is None:
+            rows = [('GPU', 'карта AMD (0x1002) не найдена')]
+        else:
+            rows = [('GPU temp', fmt_c(gpu['temp_c']) + g.deg,
+                     temp_color(gpu['temp_c'], fmt_c)),
+                    ('GPU freq', fmti(gpu['sclk_mhz']) + ' MHz'),
+                    ('GPU load', fmti(gpu['busy_pct']) + '%'),
+                    ('GPU power', fmti(gpu['power_w']) + ' W'),
+                    ('VRAM', fmt_gib(gpu['vram_used']) + ' GiB'),
+                    ('GTT', fmt_gib(gpu['gtt_used']) + ' GiB')]
+        cpu = snap['cpu_t']
+        rows.append(('CPU temp',
+                     (fmt_c(cpu) + g.deg) if cpu is not None else '?',
+                     temp_color(cpu, fmt_c)))
+        lost = (snap['stats'] or {}).get('device_lost')
+        rows.append(('Device lost', fmti(lost), C_RED if (lost or 0) > 0 else 0))
+        return rows
 
     def rows_memory(self, snap):
+        # Блок «Память» (SPEC §3): RAM avail/total + bar (hfctl 1:1, ширина
+        # 10), цвет по заполнению (≤0.1 красный, ≤0.2 жёлтый); VRAM/GTT used
         g = self.glyphs
         mem = snap['mem']
-        temp = fmt_c(snap['temp_c']) + g.deg if snap['temp_c'] is not None else '?'
-        return [('RAM', '%s/%s GiB' % (fmt1(mem.get('available_gib')),
-                                       fmt1(mem.get('total_gib')))),
-                ('Temp', temp)]
+        gpu = snap['gpu'] or {}
+        avail, total = mem.get('available_gib'), mem.get('total_gib')
+        width = 10
+        if avail is None or total is None:
+            val = '?'
+            mem_attr = 0
+        else:
+            n = max(0, min(width, int(round(avail / total * width))))
+            val = ('%s%s %s/%s GiB' % (g.bar_full * n, g.bar_empty * (width - n),
+                                       fmt1(avail), fmt1(total)))
+            mem_attr = mem_fill_color(avail, total)
+        return [('RAM', val, mem_attr),
+                ('VRAM', fmt_gib(gpu.get('vram_used')) + ' GiB'),
+                ('GTT', fmt_gib(gpu.get('gtt_used')) + ' GiB')]
+
+    def rows_engine(self, snap, route, conf):
+        # Блок «Движок» (task.md Round 2, формулы v2): мёртвый сервер —
+        # ровно строка «недоступен» (v1); спекуляция — выделенная строка
+        # (A_BOLD); prompt-lookup — только при ненулевых суммарных
+        if not snap['engine_ok']:
+            return [('недоступен', '')]
+        st = snap['stats'] or {}
+        d = self.last_deltas or {}
+        rows = [('Роут', '%s · s%s · ctx %s' % (route['spec'] or '?',
+                                                route['sessions'] or '?',
+                                                route['ctx'] or '?'))]
+        if any(conf.values()):
+            disk = conf.get('disk')
+            disk_s = (fmt1(float(disk) / (1024.0 ** 3)) + ' GiB') if disk else '?'
+            conf_part = 'ram %s · disk %s' % (conf.get('ram_cache') or '?', disk_s)
+        else:
+            conf_part = 'нет данных'
+        rows.append(('Режим', ('готов' if snap['ready'] else 'нет')
+                     + ' | cache: ' + conf_part))
+        rows.append(('Генерация', '%s (средн) · %s (посл) tok/s'
+                     % (fmt1(st.get('gen_avg')), fmt1(st.get('gen_last')))))
+        rows.append(('Prefill', '%s (средн) · %s (посл) tok/s'
+                     % (fmt1(st.get('prefill_avg')), fmt1(st.get('prefill_last')))))
+        rows.append(('Кэш-эффект', fmt_pct(st.get('cache_pct'))))
+        rows.append(('Спекуляция принято', fmt_pct(st.get('spec_pct')),
+                     curses.A_BOLD))
+        rows.append(('Draft-пульс', '+%s ток/тик' % (d.get('drafts') or 0)))
+        rows.append(('KV', '%s · пик %s' % (fmt_pct(st.get('kv_pct')),
+                                            fmt_tok(st.get('kv_peak')))))
+        rows.append(('Очередь', '%s/%s' % (fmti(st.get('q_proc')),
+                                           fmti(st.get('q_def')))))
+        rows.append(('Префил', '%s обработано · %s из кэша'
+                     % (fmt_tok(st.get('tok_prompt')),
+                        fmt_tok(st.get('tok_cached')))))
+        rows.append(('Сгенерировано', fmt_tok(st.get('tok_pred'))))
+        lt = st.get('lookup_tok') or 0
+        la = st.get('lookup_acc') or 0
+        if lt > 0 or la > 0:
+            rows.append(('Prompt-lookup', '%s/%s (%s)' % (fmt_tok(la), fmt_tok(lt),
+                                                          fmt_pct(st.get('lookup_pct')))))
+        return rows
+
+    def rows_speed(self, W):
+        # Блок «Скорость» (task.md Round 2): sparkline пульса — decode/
+        # prefill LIVE (token-счётчики движутся по чанкам), drafts — пульс
+        # завершений (Δdraft_tokens); дельта — НЕ скорость (ток/тик)
+        width = max(4, W // 2 - 18)
+        return [('decode', watch_engine.sparkline(self.hist['decode'], width,
+                                                  self.glyphs.spark)),
+                ('prefill', watch_engine.sparkline(self.hist['prefill'], width,
+                                                   self.glyphs.spark)),
+                ('drafts', watch_engine.sparkline(self.hist['drafts'], width,
+                                                  self.glyphs.spark))]
 
     def draw(self, win, W, H, snap):
         win.erase()
         g = self.glyphs
+        route, conf = self.route_conf()
         put(win, 0, 0, g.dot, self.attr(C_GREEN if snap['engine_ok'] else C_RED))
-        model, up = self.engine_state()
         left, mid, right, mid_x, right_x, draw_mid, draw_right = \
-            status_bar_layout(W, self.interval, model or '-', self.paused)
+            status_bar_layout(W, self.interval, route['model'] or '-', self.paused)
         put(win, 0, 2, left)
         if draw_mid:
             put(win, 0, mid_x, mid)
@@ -695,31 +1059,38 @@ class Watch:
             put(win, 0, right_x, right)
         if H < 4 or W < 8:
             return
-        rows_e = self.rows_engine(snap, model, up)
-        rows_m = self.rows_memory(snap)
-        rows_s = self.rows_speed(snap)
+        rows_hw = self.rows_hardware(snap)
+        rows_mem = self.rows_memory(snap)
+        rows_e = self.rows_engine(snap, route, conf)
+        rows_s = self.rows_speed(W)
         col_w = max(10, W // 2)
         x2 = W - col_w
-        h1 = max(len(rows_e), len(rows_m)) + 3
+        h1 = max(len(rows_hw), len(rows_mem)) + 2
+        h_e = len(rows_e) + 2
+        h_s = len(rows_s) + 2
         LOG_MIN = 3
-        h2 = len(rows_s) + 3
-        rem = H - 1 - h1 - h2
+        budget = H - 1
+        rem = budget - h1 - h_e - h_s
+        if rem < LOG_MIN:  # режем «Движок» (самый длинный), логи держим
+            h_e = max(3, budget - h1 - h_s - LOG_MIN)
+            rem = budget - h1 - h_e - h_s
         if rem < LOG_MIN:
-            # не хватает вертикали: режем «Скорость» (сырые ключи — самый
-            # длинный список), логи держим в LOG_MIN
-            h2 = max(3, H - 1 - h1 - LOG_MIN)
-            rem = H - 1 - h1 - h2
-        log_top = 1 + h1 + h2
-        self.block(win, 0, 1, col_w, h1, 'Движок', rows_e)
+            h_s = max(3, budget - h1 - h_e - LOG_MIN)
+            rem = budget - h1 - h_e - h_s
+        if rem < LOG_MIN:
+            h1 = max(3, budget - h_e - h_s - LOG_MIN)
+            rem = budget - h1 - h_e - h_s
+        self.block(win, 0, 1, col_w, h1, 'Железо', rows_hw)
         if W >= 2 * col_w:
-            self.block(win, x2, 1, col_w, h1, 'Память', rows_m)
-        self.block(win, 0, 1 + h1, W, h2, 'Скорость', rows_s)
+            self.block(win, x2, 1, col_w, h1, 'Память', rows_mem)
+        self.block(win, 0, 1 + h1, W, h_e, 'Движок', rows_e)
+        self.block(win, 0, 1 + h1 + h_e, W, h_s,
+                   'Скорость · пульс завершений', rows_s)
+        log_top = 1 + h1 + h_e + h_s
         self.box(win, 0, log_top, W, rem)
-        put(win, log_top + 1, 2, 'Логи')
-        # Контент — только при rem ≥ 4 (при минимуме 3 зона = рамка +
-        # «Логи» + рамка: каркас hfctl, иначе строка легла бы на нижнюю рамку)
+        put(win, log_top + 1, 2, 'Логи', curses.A_BOLD)
         if self.log_view and rem >= 4:
-            for i, ln in enumerate(self.log_view[-(rem - 3):]):
+            for i, ln in enumerate(self.log_view[-(rem - 2):]):
                 put(win, log_top + 2 + i, 2, ln)
         elif rem >= 4:
             put(win, log_top + 2, 2, '(ждём логи…)')
@@ -752,4 +1123,4 @@ def main(argv):
 
 
 if __name__ == '__main__':
-    sys.exit(main(sys.argv[1:]))
+    sys.exit(main(sys.argv))

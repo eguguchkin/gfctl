@@ -23,10 +23,11 @@ che-evo (60 GiB) и che-FAEX1 (128 GB).
   трогают; `git clean -fdx` ЗАПРЕЩЁН (bootstrap при каждом запуске
   проверяет `.gitignore` — без `.data/`+`logs/` печатает warn).
 - Bootstrap «первого запуска»: любой вызов `./gfctl` создаёт каркас
-  `.data/` (юниты НЕ ставит); systemd-юниты ставят `use`/`install`
-  идемпотентно — после записи канона; daemon-reload/enable/старт таймера —
-  `use`/`install`/`on` (fix-r2: без enable после ребута юниты disabled);
-  linger — `on`/`install`.
+  `.data/` + ставит `.gfctl-containers.conf` (скоуп slirp4netns,
+  `export CONTAINERS_CONF` — этап 5.1; юниты НЕ ставит); systemd-юниты ставят
+  `use`/`install` идемпотентно — после записи канона; daemon-reload/enable/старт
+  таймера — `use`/`install`/`on` (fix-r2: без enable после ребута юниты
+  disabled); linger — `on`/`install`.
 - `install.sh` упразднён (4.4): доставка = git clone; полный снос стека —
   руками (`rm -rf` клона + `podman rmi`).
 - `uninstall` (v2): контейнер + юниты + watchdog + linger + limits.d-файл;

@@ -150,17 +150,22 @@ isint() { case "$1" in ''|*[!0-9]*) return 1 ;; *) return 0 ;; esac; }
 #   до него поднимать нечего) и проверить .gitignore клона: строки `.data/`
 #   и `logs/` обязаны игнорироваться (репо = стек, данные живут рядом с кодом;
 #   иначе `git clean -fdx` снесёт модели/кэш/логи) — нарушение → warn.
+#   Этап 5.1: доставить .gfctl-containers.conf (скоуп slirp4netns) из tpl —
+#   идемпотентно (cmp-гвард: уже стоит и байт-в-байт равен → 0 действий).
 #
 # Побочные эффекты: mkdir -p четырёх каталогов .data/ (существующие —
-#   no-op); warn в stderr при неполном .gitignore. Канон .env, маркер
-#   остановки и юниты НЕ создаёт.
+#   no-op); install -m 0644 .gfctl-containers.conf в корень клона (только
+#   при расхождении с tpl); warn в stderr при неполном .gitignore. Канон
+#   .env, маркер остановки и юниты НЕ создаёт.
 #
 # Ограничения/допущения: вызывается в верхнеуровневом скоупе диспетчера до
 #   source lib (не зависит от модулей); grep -Fqx — точные строки, `.` в
 #   имени не трактуется как метасимвол; отсутствие .gitignore = нарушение
-#   (warn), не отказ — команды работают и без git.
+#   (warn), не отказ — команды работают и без git; отсутствие tpl-источника
+#   (экзотика: клон без tpl) = тихий пропуск доставки — export-гвард ниже
+#   увидит отсутствие файла и не заскопит (поведение как прежде).
 #
-# @returns integer          # всегда 0 — только mkdir/grep/warn
+# @returns integer          # всегда 0 — только mkdir/cmp/install/grep/warn
 bootstrap_dirs() {
   mkdir -p "$STACK_DIR/.data/models/27b" "$STACK_DIR/.data/models/flash" \
            "$STACK_DIR/.data/cache" "$STACK_DIR/.data/logs"
@@ -169,8 +174,34 @@ bootstrap_dirs() {
      || ! grep -Fqx 'logs/' "$STACK_DIR/.gitignore"; then
     warn "в .gitignore клона нет '.data/' и/или 'logs/' — git clean -fdx удалит данные сервера (модели/кэш/логи); git clean -fdx ЗАПРЕЩЁН (верни .gitignore из репо)"
   fi
+  if [ -f "$TPL_DIR/containers/gfctl-containers.conf" ] \
+     && ! cmp -s "$TPL_DIR/containers/gfctl-containers.conf" \
+                 "$STACK_DIR/.gfctl-containers.conf"; then
+    install -m 0644 "$TPL_DIR/containers/gfctl-containers.conf" \
+                    "$STACK_DIR/.gfctl-containers.conf"
+  fi
 }
 bootstrap_dirs
+
+# ── CONTAINERS_CONF-скоуп (этап 5.1): класс AppArmor/pasta teardown ─────────
+# Назначение: заскоупить podman-вызовы gfctl на slirp4netns вместо pasta
+#   (EXP-012/013 llm-lab: AppArmor denied signal при teardown netns убивает
+#   stop/down; slirp4netns-бэкенд класса не имеет, хранилище общее —
+#   graphRoot идентичен). env процессный: наследуют ТОЛЬКО дети gfctl
+#   (юниты зовут bash $STACK_DIR/gfctl _boot|_watchdog — покрыты
+#   автоматически); hfctl-прод env не получает, глобальный
+#   ~/.config/containers не трогается.
+#
+# Побочные эффекты: export CONTAINERS_CONF в текущем процессе (файл создан
+#   bootstrap_dirs выше).
+#
+# Ограничения/допущения: if-гвард обязателен (set -e-безопасная форма, не
+#   `[ -f ] &&`); файла нет (клон без tpl) → env чист → поведение как прежде.
+#
+# @returns integer          # 0 — export выполнен или файл отсутствует
+if [ -f "$STACK_DIR/.gfctl-containers.conf" ]; then
+  export CONTAINERS_CONF="$STACK_DIR/.gfctl-containers.conf"
+fi
 
 # ── lib-модули (порядок: от данных к командам; зависимости функций — lazy) ──
 # Назначение: подключение дерева lib/ — порядок source фиксирован и значим.

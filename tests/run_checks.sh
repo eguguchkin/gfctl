@@ -55,6 +55,9 @@ printf '.data/\nlogs/\n' > "$TMP/stack/.gitignore"
 #             /metrics — канонический текст с
 #             llamacpp:prompt_tokens_cached_total 539 (файловый оверрайд
 #             GFCTL_FAUX_METRICS; FAILALL валит и его — watch-«недоступен»);
+#             GFCTL_FAUX_METRICS_SEQ="f1:f2:…" — вызов №N отдаёт файл
+#             min(N, длина списка) (4.5: live-дельты/пульс watch v2 по
+#             3 снапшотам tests/fixtures/metrics_snap*.txt);
 #   stat     — GFCTL_FAUX_STAT_FSTYPE задан → печать типа ФС (tmpfs-детект
 #             cache --verify); НЕ задан → passthrough в реальный
 #             /usr/bin/stat (модели/doctor живут как раньше);
@@ -64,6 +67,9 @@ FAUXLOG="$TMP/faux.log"; FAUXCNT="$TMP/faux.cnt"
 : > "$FAUXLOG"; rm -f "$FAUXCNT" "$FAUXCNT.curl" "$FAUXCNT.ctx"
 cat > "$FAUX/podman" <<'EOF'
 #!/usr/bin/env bash
+# 5.1: строка факта CONTAINERS_CONF — только по GFCTL_FAUX_LOG_ENV=1 (старые
+# счётчики строк журнала не едут)
+[ -n "${GFCTL_FAUX_LOG_ENV:-}" ] && printf 'env CONTAINERS_CONF=%s\n' "${CONTAINERS_CONF:-}" >> "${GFCTL_FAUX_LOG:?}"
 { printf 'podman'; printf ' %s' "$@"; printf '\n'; } >> "${GFCTL_FAUX_LOG:?}"
 case "${1:-}" in
   run)
@@ -76,7 +82,14 @@ case "${1:-}" in
     if [ -n "${GFCTL_FAUX_RUNFAIL:-}" ]; then
       n=$(cat "$GFCTL_FAUX_CNT" 2>/dev/null || echo 0)
       n=$((n + 1)); echo "$n" > "$GFCTL_FAUX_CNT"
-      [ "$n" -le "$GFCTL_FAUX_RUNFAIL" ] && exit 1
+      if [ "$n" -le "$GFCTL_FAUX_RUNFAIL" ]; then
+        # 5.1/D8: сигнатура storage-сироты (orphan-heal) по GFCTL_FAUX_ORPHAN=1;
+        # ID сценарится GFCTL_FAUX_ORPHAN_ID (дефолт — 64-hex канон теста)
+        [ -n "${GFCTL_FAUX_ORPHAN:-}" ] \
+          && printf 'Error: container name "gufo" is already in use by %s: container already exists: external entity\n' \
+             "${GFCTL_FAUX_ORPHAN_ID:-0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef}" >&2
+        exit 1
+      fi
     fi
     exit 0 ;;
   logs)
@@ -173,7 +186,13 @@ case "$*" in
     n=$(cat "$GFCTL_FAUX_CNT.curl" 2>/dev/null || echo 0)
     n=$((n + 1)); echo "$n" > "$GFCTL_FAUX_CNT.curl"
     [ "${GFCTL_FAUX_CURL_FAILALL:-0}" = 1 ] && exit 7
-    if [ -n "${GFCTL_FAUX_METRICS:-}" ]; then cat "$GFCTL_FAUX_METRICS"; else
+    seq="${GFCTL_FAUX_METRICS_SEQ:-}"
+    if [ -n "$seq" ]; then
+      # 4.5: вызов №N → файл min(N, длина списка) — live-дельты watch v2
+      total=$(awk -F: '{print NF}' <<<"$seq")
+      i=$n; [ "$i" -gt "$total" ] && i=$total
+      cat "$(awk -F: -v i="$i" '{print $i}' <<<"$seq")"
+    elif [ -n "${GFCTL_FAUX_METRICS:-}" ]; then cat "$GFCTL_FAUX_METRICS"; else
       printf '# HELP llamacpp:prompt_tokens_cached_total Total prompt tokens reused from cache\n# TYPE llamacpp:prompt_tokens_cached_total counter\nllamacpp:prompt_tokens_cached_total 539\n'
     fi
     exit 0 ;;
@@ -215,14 +234,44 @@ cat > "$FAUX/sleep" <<'EOF'
 { printf 'sleep'; printf ' %s' "$@"; printf '\n'; } >> "${GFCTL_FAUX_LOG:?}"
 exit 0
 EOF
+# 5.1: id — ТОЛЬКО `id -nG` мокается (GPU-prep группы/doctor); остальное —
+# passthrough в реальный id ( GFCTL_FAUX_GROUPS не задан → тоже passthrough)
+cat > "$FAUX/id" <<'EOF'
+#!/usr/bin/env bash
+if [ -n "${GFCTL_FAUX_GROUPS:-}" ]; then
+  case " $* " in
+    *" -nG "*) printf '%s\n' "$GFCTL_FAUX_GROUPS"; exit 0 ;;
+  esac
+fi
+for real in /usr/bin/id /bin/id; do
+  [ -x "$real" ] && exec "$real" "$@"
+done
+exit 127
+EOF
+cat > "$FAUX/usermod" <<'EOF'
+#!/usr/bin/env bash
+{ printf 'usermod'; printf ' %s' "$@"; printf '\n'; } >> "${GFCTL_FAUX_LOG:?}"
+exit 0
+EOF
+cat > "$FAUX/podman-compose" <<'EOF'
+#!/usr/bin/env bash
+{ printf 'podman-compose'; printf ' %s' "$@"; printf '\n'; } >> "${GFCTL_FAUX_LOG:?}"
+exit 0
+EOF
+cat > "$FAUX/containers-storage" <<'EOF'
+#!/usr/bin/env bash
+{ printf 'containers-storage'; printf ' %s' "$@"; printf '\n'; } >> "${GFCTL_FAUX_LOG:?}"
+exit 0
+EOF
 chmod +x "$FAUX"/*
-if [ "$(ls "$FAUX" | wc -l)" = 7 ]; then ok "faux-bin: 7 заглушек (podman/systemctl/loginctl/sudo/curl/stat/sleep)"; else bad "faux-bin создание"; fi
+if [ "$(ls "$FAUX" | wc -l)" = 11 ]; then ok "faux-bin: 11 заглушек (podman/systemctl/loginctl/sudo/curl/stat/sleep/id/usermod/podman-compose/containers-storage)"; else bad "faux-bin создание ($(ls "$FAUX" | wc -l))"; fi
 
 # frun — процессный запуск ./gfctl с faux-PATH: лог/счётчики/паузы — швы
 # теста; HOME/GFCTL_DIR — в $TMP (никаких следов в реальном home).
 frun() {  # frun <cmd...> — rc наружу; env-сценарии GFCTL_FAUX_* задаёт caller
   PATH="$FAUX:$PATH" GFCTL_DIR="$TMP/stack" HOME="$TMP/home" \
   GFCTL_FAUX_LOG="$FAUXLOG" GFCTL_FAUX_CNT="$FAUXCNT" \
+  GFCTL_FAUX_GROUPS="${GFCTL_FAUX_GROUPS:-tester render video}" \
   GFCTL_RECREATE_PAUSE_S=0 GFCTL_HEALTH_POLL=1 GFCTL_SMOKE_RETRY_S=0 \
   GFCTL_RUN_ATTEMPTS="${GFCTL_RUN_ATTEMPTS:-3}" \
   ./gfctl "$@"
@@ -256,6 +305,12 @@ gf() {  # gf <bash-код> — stdout+stderr и rc наружу
     source "$LIB_DIR/units.sh";     source "$LIB_DIR/health.sh"
     source "$LIB_DIR/agentcheck.sh"
     source "$LIB_DIR/autostart.sh"; source "$LIB_DIR/commands.sh"
+    # 5.1: харнесс-шимы НОВЫХ гейтов preflight (определены после source —
+    # сценарий в eval переопределяет свободно); GFCTL_FAUX_GROUPS — дефолт
+    # «группы в порядке» (уважает caller-значение)
+    gpu_nodes_present(){ return 0; }
+    ulimit(){ echo unlimited; }
+    export GFCTL_FAUX_GROUPS="${GFCTL_FAUX_GROUPS:-tester render video}"
     eval "$1"
   )
 }
@@ -768,6 +823,144 @@ cmd_install --profile 27b-single' 2>&1); g2_rc=$?; set -e
   && ok "(б) ml=1000 < порога: exit 42 + запись limits.d-файла" \
   || { bad "(б) ml=1000 (rc=$g2_rc)"; tail -4 <<<"$out"; }
 
+echo "== 17c. preflight_host (5.1, И1): apt-пятёрка / GPU-prep / порядок / коды 42/1/0 / скоуп / doctor"
+# харнесс §17b-прецедент: гейты шимятся в коде сценария; PATH-наборы — для
+# сценариев «пакеты отсутствуют/нет sudo» (симлинки базовых утилит, БЕЗ пятёрки)
+STRIPPED="$TMP/stripped"; mkdir -p "$STRIPPED"
+for b in tr grep uname bash; do ln -s "$(command -v "$b")" "$STRIPPED/$b"; done   # bash — shebang `#!/usr/bin/env bash` faux-скриптов
+ln -s "$FAUX/id" "$STRIPPED/id"; ln -s "$FAUX/usermod" "$STRIPPED/usermod"
+ln -s "$FAUX/sudo" "$STRIPPED/sudo"
+printf '#!/usr/bin/env bash\nexit 0\n' > "$STRIPPED/apt-get"; chmod +x "$STRIPPED/apt-get"   # command -v видит; НЕ исполняется (sudo-мок не passthrough)
+NOSUDO="$TMP/stripped-nosudo"; mkdir -p "$NOSUDO"
+for f in "$STRIPPED"/*; do b=$(basename "$f"); [ "$b" = sudo ] || ln -s "$(readlink -f "$f")" "$NOSUDO/$b"; done
+FAILSUDO="$TMP/failsudo"; mkdir -p "$FAILSUDO"
+cat > "$FAILSUDO/sudo" <<'EOF'
+#!/usr/bin/env bash
+{ printf 'sudo'; printf ' %s' "$@"; printf '\n'; } >> "${GFCTL_FAUX_LOG:?}"
+case "$*" in *install*) exit 1 ;; esac
+exit 0
+EOF
+printf '#!/usr/bin/env bash\nexit 0\n' > "$FAILSUDO/apt-get"; chmod +x "$FAILSUDO"/*
+touch "$TMP/kfd"   # kfd-хук существования (GFCTL_KFD; прод env пуст)
+PREF_SHIMS='gpu_nodes_present(){ return 0; }
+ram_gate_line(){ printf "%s: ≥N GiB — есть 999.0: OK\n" "$1"; }
+ulimit(){ echo unlimited; }'
+# T1 pkgs-missing: stripped-набор без пятёрки → apt-пятёрка ОДНОЙ парой update→install
+: > "$FAUXLOG"
+set +e; out=$(GFCTL_KFD="$TMP/kfd" gf "PATH=\"$STRIPPED\"
+$PREF_SHIMS
+preflight_host 27b-single" 2>&1); t1_rc=$?; set -e
+sudo_log=$(grep '^sudo ' "$FAUXLOG" || true)
+[ "$t1_rc" = 0 ] && [ "$sudo_log" = "sudo apt-get update -qq
+sudo apt-get install -y -qq podman podman-compose containers-storage psmisc curl" ] \
+  && ! grep -q '^usermod' "$FAUXLOG" \
+  && ok "T1 pkgs-missing: rc 0; в журнале ровно пара update→install с полным списком пятёрки; группы no-op" \
+  || { bad "T1 pkgs-missing (rc=$t1_rc): журнал sudo:
+$sudo_log"; tail -3 <<<"$out"; }
+# T2 pkgs-present: FAUX-набор со всеми пятью → ноль sudo/apt (идемпотентность)
+: > "$FAUXLOG"
+set +e; out=$(GFCTL_KFD="$TMP/kfd" gf "$PREF_SHIMS
+preflight_host 27b-single" 2>&1); t2_rc=$?; set -e
+[ "$t2_rc" = 0 ] && [ "$(grep -c '^sudo apt-get' "$FAUXLOG")" = 0 ] \
+  && ok "T2 pkgs-present: rc 0; apt-get в журнале 0 раз («всё на месте» → 0 действий)" \
+  || bad "T2 pkgs-present (rc=$t2_rc, apt=$(grep -c '^sudo apt-get' "$FAUXLOG"))"
+# T3 нет sudo: stripped без sudo, need непуст → FATAL + рецепт, rc 1
+: > "$FAUXLOG"
+set +e; out=$(GFCTL_KFD="$TMP/kfd" gf "PATH=\"$NOSUDO\"
+$PREF_SHIMS
+preflight_host 27b-single" 2>&1); t3_rc=$?; set -e
+[ "$t3_rc" = 1 ] && grep -q 'sudo не найден' <<<"$out" \
+  && grep -q 'podman-compose containers-storage psmisc curl' <<<"$out" \
+  && ok "T3 нет sudo: rc 1, FATAL с ручным рецептом (списком пятёрки) — не тихий skip" \
+  || { bad "T3 нет sudo (rc=$t3_rc)"; tail -3 <<<"$out"; }
+# T4 apt-сбой: faux sudo rc 1 на install → FATAL «apt не смог» + рецепт; НЕ продолжил
+: > "$FAUXLOG"
+set +e; out=$(GFCTL_KFD="$TMP/kfd" gf "PATH=\"$FAILSUDO:$STRIPPED\"
+$PREF_SHIMS
+preflight_host 27b-single" 2>&1); t4_rc=$?; set -e
+[ "$t4_rc" = 1 ] && grep -q 'apt не смог' <<<"$out" \
+  && ! grep -q 'tee /etc/security/limits.d' "$FAUXLOG" \
+  && ok "T4 apt-сбой: rc 1, FATAL с рецептом, memlock-гейт не достигнут (поток не продолжен)" \
+  || { bad "T4 apt-сбой (rc=$t4_rc)"; tail -3 <<<"$out"; }
+# T5 не-GPU: хуки → несуществующие → info-пропуск; железный гейт die; без usermod/apt/limits
+: > "$FAUXLOG"
+set +e; out=$(GFCTL_KFD="$TMP/no-kfd" GFCTL_DRI="$TMP/no-dri" gf 'gpu_nodes_present(){ return 1; }
+preflight_host 27b-single' 2>&1); t5_rc=$?; set -e
+[ "$t5_rc" = 1 ] && grep -q 'GPU-подготовка пропущена' <<<"$out" \
+  && grep -q 'нет /dev/kfd или /dev/dri' <<<"$out" \
+  && [ "$(grep -c '^usermod' "$FAUXLOG")" = 0 ] && [ "$(grep -c '^sudo' "$FAUXLOG")" = 0 ] \
+  && ok "T5 не-GPU: rc 1 (железный гейт, прежний текст); info-пропуск; usermod/apt/limits 0" \
+  || { bad "T5 не-GPU (rc=$t5_rc)"; tail -3 <<<"$out"; }
+# T6 группа отсутствует: kfd-хук есть, GFCTL_FAUX_GROUPS без video → usermod + 42 (apt/limits не достигнуты)
+: > "$FAUXLOG"
+set +e; out=$(GFCTL_KFD="$TMP/kfd" GFCTL_FAUX_GROUPS="tester render" gf "$PREF_SHIMS
+preflight_host 27b-single" 2>&1); t6_rc=$?; set -e
+[ "$t6_rc" = 42 ] && grep -q '^sudo usermod -aG render,video tester$' "$FAUXLOG" \
+  && grep -q 'после перезахода' <<<"$out" \
+  && ! grep -q '^sudo apt-get' "$FAUXLOG" && ! grep -q 'tee /etc/security/limits.d' "$FAUXLOG" \
+  && ok "T6 группа отсутствует: rc 42, usermod -aG render,video, apt/limits не достигнуты (GPU-prep раньше apt)" \
+  || { bad "T6 группа отсутствует (rc=$t6_rc)"; tail -3 <<<"$out"; }
+# T7 группы ок: обе в GFCTL_FAUX_GROUPS → полный no-op sudo по группам
+: > "$FAUXLOG"
+set +e; out=$(GFCTL_KFD="$TMP/kfd" gf "$PREF_SHIMS
+preflight_host 27b-single" 2>&1); t7_rc=$?; set -e
+[ "$t7_rc" = 0 ] && [ "$(grep -c '^usermod' "$FAUXLOG")" = 0 ] \
+  && ok "T7 группы ок: rc 0, usermod 0 раз (no-op)" || bad "T7 группы ок (rc=$t7_rc, usermod=$(grep -c '^usermod' "$FAUXLOG"))"
+# T8 use-путь: preflight в cmd_use (И1) — шимы харнесса, kfd нет
+: > "$FAUXLOG"; rm -f "$FAUXCNT" "$FAUXCNT.curl"
+set +e; out=$(GFCTL_FAUX_PODMAN_LOGS="$LOGOK" gf "$PREF_SHIMS
+cmd_use 27b-single --no-probe" 2>&1); t8_rc=$?; set -e
+[ "$t8_rc" = 0 ] && grep -q 'GPU-подготовка пропущена' <<<"$out" \
+  && [ "$(grep -c '^usermod' "$FAUXLOG")" = 0 ] && [ "$(grep -c '^sudo apt-get' "$FAUXLOG")" = 0 ] \
+  && ok "T8 use-путь: rc 0; preflight отработал (GPU-пропущена, usermod/apt 0) — прежние use-ассерты §18 живы" \
+  || { bad "T8 use-путь (rc=$t8_rc)"; tail -4 <<<"$out"; }
+# T9 скоуп-файл: bootstrap доставил .gfctl-containers.conf (байты = tpl), env виден podman'у
+rm -f "$TMP/stack/.gfctl-containers.conf"; : > "$FAUXLOG"
+set +e; out=$(GFCTL_FAUX_LOG_ENV=1 frun doctor 2>&1); t9_rc=$?; set -e
+[ "$t9_rc" = 0 ] && [ -f "$TMP/stack/.gfctl-containers.conf" ] \
+  && cmp -s tpl/containers/gfctl-containers.conf "$TMP/stack/.gfctl-containers.conf" \
+  && grep -Fqx "env CONTAINERS_CONF=$TMP/stack/.gfctl-containers.conf" "$FAUXLOG" \
+  && grep -q 'slirp-скоуп: да' <<<"$out" \
+  && ok "T9 скоуп-файл: bootstrap доставил (байты = tpl), frun-процесс экспортировал CONTAINERS_CONF (env в журнале podman, doctor: да)" \
+  || { bad "T9 скоуп-файл (rc=$t9_rc)"; tail -3 <<<"$out"; }
+# T10 скоуп-гвард: клон без tpl-источника → файл не доставлен, env чист; tpl вернули → файл восстановлен
+FC3="$TMP/fresh-clone3"; FH3="$TMP/fresh-home3"; mkdir -p "$FC3" "$FH3"
+cp -r gfctl lib tpl .gitignore "$FC3/"
+run_fc3() { (cd "$FC3" && env -u GFCTL_DIR HOME="$FH3" PATH="$FAUX:$PATH" \
+  GFCTL_FAUX_LOG="$FAUXLOG" GFCTL_FAUX_CNT="$FAUXCNT" GFCTL_FAUX_LOG_ENV=1 \
+  bash "$FC3/gfctl" doctor >/dev/null 2>&1); }
+: > "$FAUXLOG"; rm -f "$FC3/.gfctl-containers.conf"; run_fc3
+[ -f "$FC3/.gfctl-containers.conf" ] \
+  && grep -Fqx "env CONTAINERS_CONF=$FC3/.gfctl-containers.conf" "$FAUXLOG" \
+  && ok "T10 (а) свежий клон: bootstrap доставил conf, экспорт виден faux-podman'у" \
+  || bad "T10 (а) свежий клон: файл/env не на месте"
+: > "$FAUXLOG"; rm -f "$FC3/.gfctl-containers.conf" "$FC3/tpl/containers/gfctl-containers.conf"; run_fc3
+[ ! -e "$FC3/.gfctl-containers.conf" ] && grep -Fqx 'env CONTAINERS_CONF=' "$FAUXLOG" \
+  && ok "T10 (б) скоуп-гвард: tpl-источника нет → файла нет → env чист (поведение как прежде)" \
+  || bad "T10 (б) скоуп-гвард: env не чист ($(grep '^env CONTAINERS_CONF' "$FAUXLOG" | head -1))"
+cp tpl/containers/gfctl-containers.conf "$FC3/tpl/containers/gfctl-containers.conf"; run_fc3
+[ -f "$FC3/.gfctl-containers.conf" ] \
+  && ok "T10 (в) tpl вернули → повторный запуск восстановил файл (bootstrap идемпотентен)" \
+  || bad "T10 (в) файл не восстановлен"
+# T11 юнит-путь: юниты зовут ТОЛЬКО диспетчер — Environment=CONTAINERS_CONF в tpl НЕТ
+grep -q '^ExecStart=/usr/bin/env bash .*gfctl _boot$' "$ud/gfctl-serve.service" \
+  && ! grep -q 'CONTAINERS_CONF' "$ud/gfctl-serve.service" "$ud/gfctl-watchdog.service" "$ud/gfctl-watchdog.timer" \
+  && ! grep -rq CONTAINERS_CONF tpl/systemd/ \
+  && ok "T11 юниты: ExecStart=bash …gfctl _boot; CONTAINERS_CONF в юнитах/tpl нет (экспорт диспетчерский — юниты не разрослись)" \
+  || bad "T11: юниты содержат CONTAINERS_CONF или ExecStart сломан"
+# T12 doctor: пакеты-строки + slirp-строка + группы render/video (podman-compose «нет» — DOCFAUX без него)
+DOCFAUX="$TMP/faux-doc"; mkdir -p "$DOCFAUX"
+for f in "$FAUX"/*; do b=$(basename "$f"); [ "$b" = podman-compose ] || ln -s "$f" "$DOCFAUX/$b"; done
+set +e; out=$(CONTAINERS_CONF="$TMP/stack/.gfctl-containers.conf" GFCTL_FAUX_GROUPS="tester render video" \
+  gf "PATH=\"$DOCFAUX:/usr/bin:/bin\"
+cmd_doctor" 2>&1); t12_rc=$?; set -e
+[ "$t12_rc" = 0 ] && grep -q 'podman: да' <<<"$out" && grep -q 'podman-compose: нет' <<<"$out" \
+  && grep -q 'containers-storage: да' <<<"$out" && grep -q 'curl: да' <<<"$out" \
+  && grep -q 'slirp-скоуп: да (slirp4netns' <<<"$out" && grep -q 'группы render/video: да' <<<"$out" \
+  && ok "T12 doctor: пакеты-пятёрка (compose «нет»), slirp-скоуп: да, группы render/video: да; rc 0" \
+  || { bad "T12 doctor (rc=$t12_rc)"; grep -E 'пакеты|slirp|группы' <<<"$out"; }
+# T13 memlock-регресс — §17b (а)/(б) выше без изменений (тексты/коды байт-в-байт)
+
 echo "== 18. use: гейты → ленивая докачка → канон → recreate → health → smoke"
 set +e; ./gfctl use bogus >/dev/null 2>&1; u1_rc=$?
 ./gfctl use 27b-single --sessions abc >/dev/null 2>&1; u2_rc=$?; set -e
@@ -930,6 +1123,64 @@ seq_rm="$(grep -E '^podman (rm -f gufo|run -d --name gufo)' "$FAUXLOG" | cut -d'
 set +e; out=$(GFCTL_FAUX_RUNFAIL=99 GFCTL_RUN_ATTEMPTS=3 gf 'container_up 27b-single' 2>&1); r2_rc=$?; set -e
 [ "$r2_rc" = 1 ] && [ "$(grep -c '^podman run -d' "$FAUXLOG")" = 3 ] \
   && ok "ретрай: все GFCTL_RUN_ATTEMPTS неудачны → die rc 1, вызовов run = attempts" || bad "ретрай 2 (rc=$r2_rc)"
+
+echo "== 21b. orphan-heal (5.1/D8, mirror hfctl 13.1): сигнатура→heal→retry, гвардии, кап, die-рецепт"
+ORPHID="0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+# T14 сигнатура ошибки: run#1 с «already in use by <ID> … external entity» →
+# delete-container <ID> ровно 1 раз → ровно 2 run (heal → retry), rc 0
+: > "$FAUXLOG"; rm -f "$FAUXCNT"
+set +e; out=$(GFCTL_FAUX_RUNFAIL=1 GFCTL_FAUX_ORPHAN=1 GFCTL_FAUX_ORPHAN_ID="$ORPHID" \
+  gf 'container_up 27b-single' 2>&1); t14_rc=$?; set -e
+[ "$t14_rc" = 0 ] \
+  && [ "$(grep -c '^containers-storage delete-container ' "$FAUXLOG")" = 1 ] \
+  && grep -Fqx "containers-storage delete-container $ORPHID" "$FAUXLOG" \
+  && [ "$(grep -c '^podman run -d' "$FAUXLOG")" = 2 ] \
+  && grep -q 'storage-сирота .*повторяю up' <<<"$out" \
+  && ok "T14 orphan-heal: сигнатура → delete-container <ID> ровно 1 раз → retry, 2 run, rc 0" \
+  || { bad "T14 orphan-heal (rc=$t14_rc, heal=$(grep -c '^containers-storage delete-container' "$FAUXLOG"), run=$(grep -c '^podman run -d' "$FAUXLOG"))"; tail -4 <<<"$out"; }
+# T15 гард libpod: inspect ID → running → delete-container НЕ вызван, WARN «не сирота», цикл как прежде
+: > "$FAUXLOG"; rm -f "$FAUXCNT"
+set +e; out=$(GFCTL_FAUX_RUNFAIL=1 GFCTL_FAUX_ORPHAN=1 GFCTL_FAUX_INSPECT=running \
+  gf 'container_up 27b-single' 2>&1); t15_rc=$?; set -e
+[ "$t15_rc" = 0 ] \
+  && [ "$(grep -c '^containers-storage' "$FAUXLOG")" = 0 ] \
+  && [ "$(grep -c '^podman run -d' "$FAUXLOG")" = 2 ] \
+  && grep -q 'видит libpod — не сирота, самолечение отменено' <<<"$out" \
+  && ok "T15 гард libpod: живой ID не тронут (0 delete-container), WARN, retry обычный (2 run)" \
+  || { bad "T15 гард libpod (rc=$t15_rc)"; tail -4 <<<"$out"; }
+# T16 бинаря нет: PATH без containers-storage → WARN + ручной рецепт с ID; delete-container в журнале нет
+NOHEAL="$TMP/faux-noheal"; mkdir -p "$NOHEAL"
+for f in "$FAUX"/*; do b=$(basename "$f"); [ "$b" = containers-storage ] || ln -s "$f" "$NOHEAL/$b"; done
+: > "$FAUXLOG"; rm -f "$FAUXCNT"
+set +e; out=$(GFCTL_FAUX_RUNFAIL=1 GFCTL_FAUX_ORPHAN=1 GFCTL_FAUX_ORPHAN_ID="$ORPHID" \
+  gf "PATH=\"$NOHEAL:/usr/bin:/bin\"
+container_up 27b-single" 2>&1); t16_rc=$?; set -e
+[ "$t16_rc" = 0 ] \
+  && grep -q 'containers-storage нет в PATH — самолечение невозможно' <<<"$out" \
+  && grep -qF "containers-storage delete-container $ORPHID" <<<"$out" \
+  && [ "$(grep -c '^containers-storage' "$FAUXLOG")" = 0 ] \
+  && [ "$(grep -c '^podman run -d' "$FAUXLOG")" = 2 ] \
+  && ok "T16 бинаря нет: Variant-B деградация (WARN + ручной рецепт с ID), поведение как прежде (retry), 2 run" \
+  || { bad "T16 бинаря нет (rc=$t16_rc)"; tail -4 <<<"$out"; }
+# T17 кап: обе попытки с сигнатурой, GFCTL_HEAL_MAX=1 → ровно 1 heal, вторая НЕ лечится, die с рецептом
+: > "$FAUXLOG"; rm -f "$FAUXCNT"
+set +e; out=$(GFCTL_HEAL_MAX=1 GFCTL_RUN_ATTEMPTS=2 GFCTL_FAUX_RUNFAIL=99 GFCTL_FAUX_ORPHAN=1 \
+  gf 'container_up 27b-single' 2>&1); t17_rc=$?; set -e
+[ "$t17_rc" = 1 ] \
+  && [ "$(grep -c '^containers-storage delete-container ' "$FAUXLOG")" = 1 ] \
+  && [ "$(grep -c '^podman run -d' "$FAUXLOG")" = 2 ] \
+  && grep -q 'containers-storage delete-container <ID>' <<<"$out" \
+  && ok "T17 кап: HEAL_MAX=1 → ровно 1 heal, вторая ошибка не лечится; die при исчерпании содержит ручной рецепт" \
+  || { bad "T17 кап (rc=$t17_rc, heal=$(grep -c '^containers-storage delete-container' "$FAUXLOG"), run=$(grep -c '^podman run -d' "$FAUXLOG"))"; tail -4 <<<"$out"; }
+# T18 happy-path не зовёт хил: чистый run rc 0 → containers-storage 0 раз
+: > "$FAUXLOG"; rm -f "$FAUXCNT"
+set +e; out=$(gf 'container_up 27b-single' 2>&1); t18_rc=$?; set -e
+[ "$t18_rc" = 0 ] \
+  && [ "$(grep -c '^containers-storage' "$FAUXLOG")" = 0 ] \
+  && [ "$(grep -c '^podman run -d' "$FAUXLOG")" = 1 ] \
+  && ! grep -q 'сирота' <<<"$out" \
+  && ok "T18 happy-path: rc 0, ровно 1 run, хил-ветка не входила (containers-storage 0 раз)" \
+  || bad "T18 happy-path (rc=$t18_rc, run=$(grep -c '^podman run -d' "$FAUXLOG"))"
 
 echo "== 22. logs: -f/--tail порядок; missing → die"
 : > "$FAUXLOG"
@@ -1412,40 +1663,80 @@ cmd_cache --verify' 2>&1); cv4_rc=$?; set -e
 [ "$cv4_rc" = 0 ] && ! grep -q 'tmpfs' <<<"$out" \
   && ok "негатив: faux stat ext4 → tmpfs-WARN нет" || bad "ext4 нет-WARN (rc=$cv4_rc)"
 
-echo "== 37. watch: не-TTY стрим (1 тик), мёртвый сервер 3×«недоступен» без спама, selfcheck, через gfctl"
+echo "== 37. watch v2: не-TTY стрим (SEQ 3 снапшота: live-пульс без done + done-пульс), TZ без -t, мёртвый сервер, selfcheck, через gfctl"
+M1="$ROOT/tests/fixtures/metrics_snap1.txt"
+M2="$ROOT/tests/fixtures/metrics_snap2.txt"
+M3="$ROOT/tests/fixtures/metrics_snap3.txt"
+LOGTZ="$TMP/logtz"
+printf '2026-11-18 07:26:54 [INFO] [gpu] event=queue_budget kind=llm observed=0 budget=8 expected_max=3 cap=2\n' > "$LOGTZ"
+printf '2026-11-18 07:27:01 [INFO] [loader] event=load_completed kind=text elapsed_ms=15234 model=qwen3.8-27b-IQ4_XS-pure sessions=1 context_tokens=262144 speculative=dflash2 draft_limit=7\n' >> "$LOGTZ"
+printf '2026-11-18 07:27:02 [INFO] [cache] schema=component-cache-v1 event=configured sessions=1 ram_cache=on capacity_bytes=12884901888 automatic_bytes=4294967296 disk_capacity_bytes=68719476736\n' >> "$LOGTZ"
 : > "$FAUXLOG"; rm -f "$FAUXCNT.curl"
 set +e
-out=$(GFCTL_FAUX_PODMAN_LOGS="$LOGSP" GFCTL_FAUX_LOG="$FAUXLOG" GFCTL_FAUX_CNT="$FAUXCNT" \
-  GFCTL_WATCH_PORT=8080 GFCTL_WATCH_INTERVAL=0.01 GFCTL_WATCH_TICKS=1 \
-  PATH="$FAUX:$PATH" GFCTL_RECREATE_PAUSE_S=0 GFCTL_HEALTH_POLL=1 GFCTL_SMOKE_RETRY_S=0 \
-  python3 tpl/python/watch_tui.py 2>&1); w_rc=$?; set -e
-[ "$w_rc" = 0 ] && ok "watch plain: rc 0 после 1 тика (GFCTL_WATCH_TICKS)" || bad "watch tick rc=$w_rc"
-grep -q ' \[движок\] model: Qwen3.8 Flash Next | uptime: ? | cached_total: 539$' <<<"$out" \
-  && ok "watch: блок «Движок» — модель с пробелами из сида + cached_total" || bad "watch движок: $(grep движок <<<"$out")"
-grep -q ' \[скорость\] llamacpp:prompt_tokens_cached_total=539$' <<<"$out" \
-  && ok "watch: блок «Скорость» — сырые llamacpp:* ключи" || bad "watch скорость: $(grep скорость <<<"$out")"
-grep -qE ' \[память\] RAM: [0-9]+(\.[0-9])?/[0-9]+(\.[0-9])? GiB \| temp: ' <<<"$out" \
-  && ok "watch: блок «Память» — /proc/meminfo + hwmon-temp" || bad "watch память: $(grep память <<<"$out")"
-[ "$(cat "$FAUXCNT.curl" 2>/dev/null || echo 0)" = 1 ] \
-  && ok "watch: счётчик /metrics-вызовов = тикам (1)" || bad "watch metrics calls=$(cat "$FAUXCNT.curl" 2>/dev/null || echo 0)"
-[ "$(grep -c '^podman logs -t --tail 50' <<<"$(cat "$FAUXLOG")")" = 1 ] \
-  && ok "watch plain: сид логов один (uptime/model)" || bad "watch seed: $(grep -c 'podman logs' "$FAUXLOG")"
+out=$(GFCTL_FAUX_PODMAN_LOGS="$LOGTZ" GFCTL_FAUX_LOG="$FAUXLOG" GFCTL_FAUX_CNT="$FAUXCNT" \
+  GFCTL_FAUX_METRICS_SEQ="$M1:$M2:$M3" \
+  GFCTL_WATCH_PORT=8080 GFCTL_WATCH_INTERVAL=0.01 GFCTL_WATCH_TICKS=3 \
+  PATH="$FAUX:$PATH" python3 tpl/python/watch_tui.py 2>&1); w_rc=$?; set -e
+[ "$w_rc" = 0 ] && ok "watch v2 plain: rc 0 после 3 тиков (SEQ live+done)" || bad "watch tick rc=$w_rc"
+[ "$(grep -c '^podman logs -t' "$FAUXLOG")" = 0 ] \
+  && ok "watch v2: podman logs БЕЗ -t (DoD 4)" || bad "logs -t найден: $(grep '^podman logs' "$FAUXLOG" | head -2)"
+grep -q '^podman logs --tail 50' "$FAUXLOG" \
+  && ok "watch v2: сид логов --tail 50" || bad "сид логов: $(grep -c '^podman logs' "$FAUXLOG")"
+[ "$(grep -c '/metrics' "$FAUXLOG")" = 3 ] \
+  && ok "watch v2: /metrics 1 вызов на тик (3)" || bad "metrics calls=$(grep -c '/metrics' "$FAUXLOG")"
+[ "$(grep -c '/ready' "$FAUXLOG")" = 3 ] \
+  && ok "watch v2: /ready 1 вызов на тик (режим)" || bad "ready calls=$(grep -c '/ready' "$FAUXLOG")"
+lg=$(grep ' \[логи\] ' <<<"$out" | tail -1)
+grep -qE '\[логи\] [0-9]{2}:[0-9]{2}:[0-9]{2} \[INFO\] \[cache\]' <<<"$lg" \
+  && ok "watch v2: [логи] TZ-конверсия UTC→локальный (HH:MM:SS + хвост)" || bad "логи TZ: $lg"
+! grep -q '2026-11-18' <<<"$lg" \
+  && ok "watch v2: исходная UTC-метка заменена (даты нет)" || bad "UTC-метка осталась: $lg"
+e1=$(grep ' \[движок\] ' <<<"$out" | sed -n 1p)
+grep -q 'gen 20.0/21.4 tok/s | prefill 100.0/98.7' <<<"$e1" \
+  && ok "watch v2: средние по кумулятивным + speed-gauge «последний»" || bad "движок t1: $e1"
+grep -q 'кэш 99.0% | спек 60.0% | KV 12.0% пик 262.1k' <<<"$e1" \
+  && ok "watch v2: кэш-эффект 99.0 ≤100 (знаменатель prompt+cached), acceptance 60.0 по draft_tokens" || bad "кэш/спек t1: $e1"
+grep -q 'оч 0/0 | префил 10.0k+990.0k | сген 50.0k' <<<"$e1" \
+  && ok "watch v2: «Всего» v2 — префил (обработано+из кэша), сгенерировано, очередь" || bad "всего t1: $e1"
+grep -q 'dflash2 · s1 · ctx 262144' <<<"$e1" \
+  && ok "watch v2: роут из лога load_completed" || bad "роут t1: $e1"
+grep -q 'готов | cache: ram on · disk 64.0 GiB' <<<"$e1" \
+  && ok "watch v2: режим из /ready + configured" || bad "режим t1: $e1"
+grep -q 'lost 0' <<<"$(grep ' \[железо\] ' <<<"$out" | head -1)" \
+  && ok "watch v2: [железо] device-lost строка" || bad "железо lost: $(grep ' \[железо\] ' <<<"$out" | head -1)"
+! grep -qi 'lookup' <<<"$out" \
+  && ok "watch v2: prompt-lookup скрыт при нулевых суммарных" || bad "lookup не скрыт"
+! grep -q 'budget' <<<"$out" \
+  && ok "watch v2: prompt_state_* не читаются" || bad "prompt_state в выводе"
+e2=$(grep ' \[движок\] ' <<<"$out" | sed -n 2p)
+grep -q 'gen 20.1/' <<<"$e2" \
+  && ok "watch v2 tick2: gen_avg крип вверх при live-числителе (20.12), не падает" || bad "движок t2: $e2"
+s2=$(grep ' \[скорость\] ' <<<"$out" | sed -n 2p)
+grep -q 'пульс: decode +300 prefill +512 drafts +0' <<<"$s2" \
+  && ok "watch v2: live-пульс token-счётчиков БЕЗ done (DoD 5)" || bad "пульс t2: $s2"
+e3=$(grep ' \[движок\] ' <<<"$out" | sed -n 3p)
+grep -q 'gen 20.0/53.3' <<<"$e3" \
+  && ok "watch v2 tick3: gen_avg 50300/2515 = 20.0, gen_last = gauge 53.3 (done)" || bad "движок t3: $e3"
+grep -q 'KV 34.0% пик 27.2k' <<<"$e3" \
+  && ok "watch v2 tick3: KV% и пик поднялись на done" || bad "KV t3: $e3"
+s3=$(grep ' \[скорость\] ' <<<"$out" | sed -n 3p)
+grep -q 'пульс: decode +0 prefill +0 drafts +1000' <<<"$s3" \
+  && ok "watch v2: draft-пульс по Δdraft_tokens (не раундам)" || bad "пульс t3: $s3"
 : > "$FAUXLOG"; rm -f "$FAUXCNT.curl"
 set +e
-out=$(GFCTL_FAUX_PODMAN_LOGS="$LOGSP" GFCTL_FAUX_LOG="$FAUXLOG" GFCTL_FAUX_CNT="$FAUXCNT" \
-  GFCTL_FAUX_CURL_FAILALL=1 \
+out=$(GFCTL_FAUX_LOG="$FAUXLOG" GFCTL_FAUX_CNT="$FAUXCNT" GFCTL_FAUX_CURL_FAILALL=1 \
   GFCTL_WATCH_PORT=8080 GFCTL_WATCH_INTERVAL=0.01 GFCTL_WATCH_TICKS=3 \
   PATH="$FAUX:$PATH" python3 tpl/python/watch_tui.py 2>&1); wd_rc=$?; set -e
 [ "$wd_rc" = 0 ] && [ "$(grep -c 'недоступен' <<<"$out")" = 3 ] \
   && ok "мёртвый сервер: ровно 3 строки «недоступен» (одна на тик), rc 0" || bad "dead lines=$(grep -c 'недоступен' <<<"$out") rc=$wd_rc"
-[ "$(cat "$FAUXCNT.curl" 2>/dev/null || echo 0)" = 3 ] \
+[ "$(grep -c '/metrics' "$FAUXLOG")" = 3 ] \
   && ok "мёртвый сервер: /metrics-вызовов = тикам (3)" || bad "dead metrics calls"
 ! grep -qi 'traceback' <<<"$out" \
   && ok "мёртвый сервер: без traceback-спама" || bad "traceback в выводе watch"
 set +e
 out=$(GFCTL_WATCH_SELFCHECK=1 python3 tpl/python/watch_tui.py 2>&1); sc_rc=$?; set -e
-[ "$sc_rc" = 0 ] && grep -q 'selfcheck: 24/24 ok' <<<"$out" \
-  && ok "watch selfcheck: 24/24 (парсер/рендер-скелет без curses)" || bad "selfcheck rc=$sc_rc: $out"
+[ "$sc_rc" = 0 ] && grep -q 'selfcheck: 80/80 ok' <<<"$out" \
+  && ok "watch selfcheck: 80/80 (формулы v2, пульс, TZ, sysfs, рендер-скелет)" || bad "selfcheck rc=$sc_rc: $out"
 : > "$FAUXLOG"
 set +e
 out=$(GFCTL_WATCH_TICKS=1 GFCTL_FAUX_PODMAN_LOGS="$LOGSP" frun watch 2>&1); fw_rc=$?; set -e

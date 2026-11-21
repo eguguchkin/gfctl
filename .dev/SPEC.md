@@ -43,38 +43,55 @@ gfctl status              # проверка
 - `STACK_DIR` = каталог gfctl-файла (`readlink -f`; запуск из любого
   подкаталога клона; `GFCTL_DIR` переопределяет). `install.sh` упразднён
   (4.4): bootstrap первого запуска — сам диспетчер (любой вызов создаёт
-  каркас `.data/`, юниты НЕ ставит).
+  каркас `.data/` и доставляет `.gfctl-containers.conf` — скоуп
+  slirp4netns для podman-вызовов gfctl, `export CONTAINERS_CONF` с гвардом
+  на файл; 5.1; юниты НЕ ставит).
 - Вся инсталляция в клоне: диспетчер + `lib/` + `tpl/`; данные — в
   `.data/` (вне git): модели `.data/models/<сет>/`, кэш
-  `.data/cache/<профиль>/`, логи `.data/logs/`; канон `.env` и маркер
-  `.gfctl-stopped` — в корне клона. `.gitignore` репо игнорит `.data/` и
-  `logs/` → `git clean -fd` безопасен; **`git clean -fdx` запрещён**
+  `.data/cache/<профиль>/`, логи `.data/logs/`; канон `.env`, маркер
+  `.gfctl-stopped` и derived-конфиг `.gfctl-containers.conf` (5.1,
+  регенерируется bootstrap'ом из tpl при каждом запуске) — в корне клона.
+  `.gitignore` репо игнорит `.data/`, `logs/` и `.gfctl-containers.conf` →
+  `git clean -fd` безопасен; **`git clean -fdx` запрещён**
   (удалит данные; bootstrap при нарушении `.gitignore` печатает warn).
+- **Первичная установка — preflight хоста (5.1, И1)**: первый
+  `use`/`install` сам доводит голую Ubuntu (`preflight_host()`, единый
+  блок для обеих команд): apt-пятёрка И1 — `podman podman-compose
+  containers-storage psmisc curl` одним `sudo apt-get update+install`
+  ТОЛЬКО при непустом need-списке («всё на месте» → ноль sudo/apt-вызовов;
+  passt/slirp4netns/uidmap приезжают Depends podman; нет sudo/apt-get/сети →
+  громкий отказ с ручным рецептом); GPU-подготовка — группы render,video
+  (`sudo usermod -aG render,video`) при наличии `/dev/kfd`|`/dev/dri`
+  (нет GPU → info-пропуск), при фактичном добавлении — «применятся только
+  после перезахода» + exit 42; limits.d НЕ дублируется (владелец —
+  memlock-гейт, один файл). Порядок: ОС → GPU-prep → железо → RAM → apt →
+  gpu-lock → memlock (тексты/коды 42 прежние байт-в-байт).
 - Вне каталога (исключения инварианта): systemd-user юниты
   `gfctl-serve.service` (oneshot, ExecStart=`gfctl _boot`) +
   `gfctl-watchdog.service/.timer` (1 мин) — отдельного boot-юнита нет
   (решение 1.2: serve-юнит сам поднимает канон), образ ghcr,
-  `limits.d/99-gfctl-memlock.conf`, группа render, linger. Юниты ставятся
-  при первом `use`/`install` (после записи канона, идемпотентно);
-  daemon-reload/enable/старт таймера — при `use`/`install`/`on` (fix-r2,
-  инцидент evo EXP-009-хвост: без enable после ребута юниты disabled);
-  linger — только `on`/`install`.
+  `limits.d/99-gfctl-memlock.conf`, группы render/video (5.1),
+  apt-пятёрка в системе (5.1, И1 — тот же список нужен hfctl), linger.
+  Юниты ставятся при первом `use`/`install` (после записи канона,
+  идемпотентно); daemon-reload/enable/старт таймера — при `use`/`install`/
+  `on` (fix-r2, инцидент evo EXP-009-хвост: без enable после ребута юниты
+  disabled); linger — только `on`/`install`.
 
 ## 3 · Карта команд
 
 | Команда | Действие |
 |---|---|
-| `gfctl install [--profile P] [--port N] [--bind A] [--models-dir D] [--no-autostart]` | Preflight → скачивание весов профиля (размер + sha256 до и после) → **probe-подбор контекста** (для мульти-профилей; при уже зафиксированном каноне пары или на healthy-повторе — пропускается: идемпотентность; 4.2) → генерация юнитов → старт → health → smoke → **автозапуск** (если не `--no-autostart`). Идемпотентен. Preflight memlock-гейт — по порогу достаточности 8388608 kB (4.1-F2, не по «unlimited»): ml ≥ порога → limits.d-файл перезаписан + WARN, install продолжается; ml < порога или нечитаемый → файл + WARN «перелогинься» + exit 42 |
-| `gfctl use 27b-single\|27b-multi\|flash-multi [--sessions N] [--context N] [--no-probe]` | Проверка гейтов → ленивый добор весов → **probe-подбор** (если не `--no-probe`) → перегенерация юнита → recreate → health → smoke. Канон профиля заменяется |
+| `gfctl install [--profile P] [--port N] [--bind A] [--models-dir D] [--no-autostart]` | Preflight (`preflight_host`, 5.1: ОС → GPU-подготовка групп render,video при наличии GPU → железный гейт → RAM-гейт → apt-пятёрка И1 одним вызовом при непустом need → gpu-lock → memlock-гейт по порогу достаточности 8388608 kB (4.1-F2, не по «unlimited»): ml ≥ порога → limits.d-файл перезаписан + WARN, install продолжается; ml < порога или нечитаемый → файл + WARN «перелогинься» + exit 42; нет sudo/apt/сети → громкий отказ с ручным рецептом) → скачивание весов профиля (размер + sha256 до и после) → **probe-подбор контекста** (для мульти-профилей; при уже зафиксированном каноне пары или на healthy-повторе — пропускается: идемпотентность; 4.2) → генерация юнитов → старт → health → smoke → **автозапуск** (если не `--no-autostart`). Идемпотентен |
+| `gfctl use 27b-single\|27b-multi\|flash-multi [--sessions N] [--context N] [--no-probe]` | Preflight хоста (`preflight_host` — тот же блок, что у install; И1: первый use на голой машине сам ставит пакеты/группы, 5.1) → ленивый добор весов → **probe-подбор** (если не `--no-probe`) → перегенерация юнита → recreate → health → smoke. Канон профиля заменяется |
 | `gfctl status [--json]` | Профиль, health, **фактический роут** (speculative=mtp/dflash2, sessions, context — из лога `load_completed`), состояние кэша (ram/disk), автозапуск, версия образа |
 | `gfctl logs [-f] [N]` | Логи контейнера |
-| `gfctl watch [--interval N]` | Живой дашборд (TTY — TUI, не-TTY — стрим): `/metrics` (`llamacpp:*`), host `/sys`/`/proc` (RAM, hwmon-температуры), `podman logs -f`. Блоки: «Движок» (model, uptime, cache tok, draft-приём), «Скорость» (predict_per_second последнего запроса), «Память», «Логи». Клавиши `q`/`+`/`-`/`p` |
+| `gfctl watch [--interval N]` | Живой дашборд (TTY — TUI, клавиши `q`/`+`/`-`/`p`; не-TTY — стрим). Блоки: **Железо** — GPU из sysfs (первая карта vendor 0x1002: temp = MAX по её `temp1_input`, sclk/power/busy, VRAM/GTT), CPU Tctl (k10temp), device-lost (из `/metrics`, красный при >0); **Память** — RAM (MemTotal/MemAvailable, цвет по заполнению) + VRAM/GTT; **Движок** — вычисляемые из кумулятивных `llamacpp:*`/`gufo:*` (генерация и prefill: средняя по счётчикам + speed-gauge «последний», кэш-эффект = cached/(prompt+cached), спекуляция accepted % по draft-токенам, KV %/пик, очередь, префил «обработано+из кэша»/сгенерировано; prompt-lookup при ненулевых), роут из лога `load_completed`, режим — `/ready` + `configured`; **Скорость** — sparkline Δ за тик («пульс», не скорость; token-счётчики движутся live); **Логи** — `podman logs` БЕЗ `-t` (время в строках движка), TZ-конверсия UTC→локальный в слое watch. Мёртвый сервер — строка «недоступен» без спама |
 | `gfctl on` / `off` | Автозапуск вкл (юниты+linger) / стоп + снятие (linger off). Файлы/веса/образ целы |
 | `gfctl bench` | Фикстура merge_sort (`253c7ac5`) ×3 по HTTP: wall, decode tok/s |
 | `gfctl smoke` | health + 3 запроса (код/проза/математика) + роут из лога (`speculative=dflash2\|mtp`) |
 | `gfctl agent-check` | **Агентская самопроверка** (см. §7): сессия 15 ходов, follow-up-лестница 5k/25k/100k, [док][вопрос], рестарт-restore — wall-цифры + сравнение с референсами (WARN при регрессии >25%) |
 | `gfctl cache [--verify]` | Сводка кэша из логов (configured/skipped/evicted) + `/metrics` cached_total; `--verify` — контрольный follow-up + рестарт-проба |
-| `gfctl doctor` | Диагностика без записи: ОС, /dev/kfd, render-группа, memlock, linger, RAM-гейты всех профилей (цифрами), диск под веса, порт, **gpu-lock** (кто держит /dev/kfd — предупреждение о hfctl-проде) |
+| `gfctl doctor` | Диагностика без записи: ОС, пакеты apt-пятёрки И1 (5.1), /dev/kfd, /dev/dri/renderD*, группы render/video (5.1), memlock, linger, RAM-гейты всех профилей (цифрами), диск под веса, порт, **gpu-lock** (кто держит /dev/kfd — предупреждение о hfctl-проде), **slirp-скоуп** (CONTAINERS_CONF + файл; 5.1) и **хранилище** graphRoot (общее с hfctl; 5.1) |
 | `gfctl models [--check-types]` | Скачано vs требуется по профилям, sha-статус, свободное место; `--check-types [сет|профиль]` — pre-check GGUF-типов (низкобитные IQ — IQ1_S/IQ1_M/IQ2_*/IQ3_XXS —, BF16/MXFP4/неизвестные в FFN → КРАСНЫЙ «не загрузится»; display-имена — канон ggml enum, BF16=30 — F20, 4.2; 41/42=Q1_0/Q2_0 — форк движка (ggml.h:431–432, 4.3); лишние аргументы → die) |
 | `gfctl uninstall` | v2 (лейаут 4.4): снимает контейнер + юниты + watchdog + linger + `limits.d/99-gfctl-memlock.conf`; данные (`.data/` — модели/кэш/логи) и podman-образ НЕ трогает (данные — инвариант; purge-флаги упразднены — полный снос руками: `rm -rf` клона + `podman rmi`). «Слоёный» снос дерева `~/gufo` и приёмочных `~/gfctl-acc*` упразднён |
 
@@ -176,7 +193,7 @@ gufo не имеет hipfire-формата /health; роут читается �
 | Драфт | env HIPFIRE_DFLASH_DRAFT | отдельный GGUF: `--dflash-model` (27B) / `--mtp-model` (flash) |
 | Контекст мульти | константа профиля | **probe-подбор максимума** с фиксацией в каноне |
 | Автоподъём | compose-unit + watchdog timer | serve-unit (oneshot up) + watchdog timer 1 мин, маркер `.gfctl-stopped` |
-| watch | /stats + /metrics hipfire | /metrics gufo (`llamacpp:*`) + логи (draft-приём) |
+| watch | /stats + /metrics hipfire | /metrics gufo (вычисляемые из `llamacpp:*`+`gufo:*`) + sysfs-железо + логи (TZ-конверсия) |
 | Агентский профиль | нет | `agent-check` + cache-disk по умолчанию |
 | Порт | 11435 | 8080 |
 | Дистрибуция | GitHub public | **локальный перенос каталога** |
@@ -219,24 +236,42 @@ podman-compose, containers-storage, psmisc, curl; GPU-подготовка хо�
 локального воркспейса разработчика запрещены — в том числе в тестовых
 прогонах (EXP): сценарий гоняется из GitHub-производного кода.
 
-Соответствие gfctl на 2026-11-21: И1 — **частично**: bootstrap первого
-запуска есть (4.4), но apt-деклараций podman/podman-compose НЕТ (на голой
-машине не поднимется), GPU-подготовки нет, netns-баг AppArmor/pasta бьёт
-gfctl-стеки так же (compose stop/down teardown — EXP-012 llm-lab) → этап 5.
-И2 — частично: rm-в-попытке (fix-r2) покрывает «already in use»; остальное —
-по паритету этапа 5.
+Соответствие gfctl (ревизия 2026-11-21, код этапа 5.1; живая приёмка —
+окно этапа 5 по D6): И1 — **по коду полное** (preflight_host на install И
+use: apt-пятёрка одним вызовом при непустом need, GPU-подготовка групп
+render,video + memlock, slirp-скоуп CONTAINERS_CONF), **честная оговорка**:
+bare-Ubuntu приёмка отложена — ресурс не выделен (D8), EXP-013 создан как
+заготовка (deferred), живьём код не подтверждён до окна. И2 — **частично,
+расширено**: rm-в-попытке (fix-r2) + `gf_orphan_heal` (mirror hfctl 13.1,
+D8 — самолечение storage-сироты «already in use by <ID>» с капом и
+гвардиями) покрывают класс «already in use»; slirp-скоуп убирает первопричину
+teardown-падений (живой приём — EXP-015 в окне). Сценарные
+последовательности И2 — EXP-014/015 созданы, не запущены (D6).
 
 ## Этап 5 (план): паритет поставки — bare-Ubuntu одна команда + сценарная приёмка
 
-- [ ] preflight `use`/bootstrap: apt-декларация podman + podman-compose
-      (идемпотентно; passt/slirp4netns/uidmap приезжают Depends podman)
-- [ ] GPU-подготовка: группы render/video, limits.d memlock — гейт по
-      /dev/kfd|/dev/dri, «нужен перелогин» (зеркало hfctl 13.2)
-- [ ] CONTAINERS_CONF-скоуп slirp4netns для gfctl-стека (EXP-012/013
-      llm-lab: AppArmor pasta signal deny — compose stop/down gfctl падает
-      так же; скоуп убирает класс целиком, хранилище общее)
-- [ ] orphan-heal: containers-storage delete-container по ID из ошибки
-      «already in use» (глубже собственного rm-в-попытке) — приёмлемость
-      решить на этапе (с slirp-скоупом первопричина уходит)
-- [ ] Сценарная приёмка: зафиксированные последовательности
-      (`gfctl off; hfctl on` и обратные) как контракт EXP/деплой-окон
+- [x] preflight `use`/`install` (`preflight_host`, 5.1): apt-пятёрка И1
+      (`podman podman-compose containers-storage psmisc curl`; одним
+      update+install при непустом need; passt/slirp4netns/uidmap —
+      Depends podman) — код готов, живая приёмка EXP-013 (deferred, D8)
+- [x] GPU-подготовка: группы render/video (`usermod -aG` + «после
+      перезахода» + exit 42), limits.d memlock — гейт по
+      /dev/kfd|/dev/dri, нет GPU → info-пропуск (зеркало hfctl 13.2);
+      limits.d не дублируется (владелец — memlock-гейт 4.1-F2);
+      живьём — EXP-013/окно
+- [x] CONTAINERS_CONF-скоуп slirp4netns для gfctl-стека: bootstrap ставит
+      `.gfctl-containers.conf` (tpl/containers), диспетчер экспортирует
+      CONTAINERS_CONF с гвардом — покрывает все podman-вызовы gfctl,
+      включая `_boot`/`_watchdog` (юниты зовут диспетчер); хранилище
+      общее (graphRoot, EXP-013 llm-lab); живой приём — EXP-015 (окно)
+- [x] orphan-heal — РЕШЕНО (D8, Round 2): MIRROR hfctl 13.1 —
+      `gf_orphan_heal` (lib/serve.sh): сигнатура «already in use by
+      <12..64-hex>» + 4 гвардии (кап GF_ORPHAN_HEALS/HEAL_MAX; нет
+      containers-storage → WARN + ручной рецепт; ID видит libpod → не
+      сирота; delete-container отказал → WARN), вызов из container_up при
+      отказе run до retry; die при исчерпании — с ручным рецептом
+- [x] Сценарная приёмка — СЦЕНАРИИ созданы (EXP-013 bare — deferred,
+      EXP-014 «gfctl off; hfctl on», EXP-015 обратная + slirp-ассерты;
+      пролог перелогина в 014/015; из GitHub-клона — И3; не запущены,
+      D6); приёмочные прогоны — окно этапа 5 (два GO: FAEX, evo) +
+      хвосты EXP-010/011/012 + ребут/рестарт-приёмы fix-r2

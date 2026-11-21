@@ -12,3 +12,5 @@ tpl/python/__pycache__/
 # git clean -fdx УДАЛЯЕТ данные — запрещён)
 .data/
 logs/
+# derived-артефакт: скоуп slirp4netns (CONTAINERS_CONF), регенерируется bootstrap'ом
+.gfctl-containers.conf
