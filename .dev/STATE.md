@@ -72,10 +72,10 @@ Fix-round counter: F1–F4 + fix-r1 (hfctl) закрыты. ЭТАП 4: ЗАКР
 1. **Watch-дашборд переделать**: текущий сделан криво; минимум — уровень hfctl-watch
    (hipfire-аналог), цель — лучше: у gufo метрики отзывчивее. Логи: убрать `podman logs -f -t`
    (время в строках уже есть), НО научить gufo писать время в TZ пользователя (сейчас UTC).
-2. **Лейаут директорий**: сейчас в home две папки (~/gfctl-gh клон + ~/gfctl-acc приёмка) —
-   схлопнуть в одну `~/gfctl/` c внутренним `~/gfctl/.runtime/…` (модели/кэш/всё из gfctl-acc).
-   Затрагивает: install.sh STACK_DIR, GFCTL_MODELS дефолт, юнит-Environment (r bc991f1),
-   EXP-скрипты путей, миграцию существующих машин.
+2. **Лейаут директорий — ВЫПОЛНЕНО живьём (2026-11-21, обе машины)**: одна папка
+   `~/gfctl/` = git-клон = STACK_DIR, данные в `~/gfctl/.data/…`; evo — чистая
+   установка с нуля, FAEX — перенос; fix-r2 (enable при install_units) —
+   b0d8ca8 задеплоен на обе. Хвост: живой ребут-приём fix-r2 (EXP-окно).
 3. **Ревизия /home/ai на обеих машинах**: инвентаризация файлов/папок (gufo-models,
    gfctl-acc-models, gufo-exp, halogen-*, halogen-cache, gfctl-acc, gfctl-acc-src, gfctl-gh,
    src, hfctl-deploy, .local/share/containers…): что нужно / что удалить (вместе с этапом
